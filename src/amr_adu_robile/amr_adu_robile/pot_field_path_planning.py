@@ -12,14 +12,18 @@ import smach
 import heapq
 
 """
-Code for A*-algorithm found on https://www.geeksforgeeks.org/python/a-search-algorithm-in-python/
+Adapted code for A*-algorithm found on https://www.geeksforgeeks.org/python/a-search-algorithm-in-python/
 """
 
 # Grid size
 ROW = 400
 COL = 400
 
+
 class GridCell():
+    """
+    Class implements A* algorithm
+    """
     def __init__(self):
         # row index
         self.parent_i = 0
@@ -68,11 +72,6 @@ class GridCell():
         # Reverse the path to get the path from source to destination
         path.reverse()
 
-        # Print the path
-        #for i in path:
-        #    print("->", i, end=" ")
-        #print()
-
     def a_star_search(self, grid, src, dest):
         # check if source and destination are valid
         if not self.is_valid(src[0], src[1]) or not self.is_valid(dest[0], dest[1]):
@@ -87,7 +86,7 @@ class GridCell():
         # Initilize the visited cells
         closed_list = [[False for _ in range(COL)] for _ in range(ROW)]
         # Initialize the details of each cell
-        cell_details = [[Cell() for _ in range(COL)] for _ in range(ROW)]
+        cell_details = [[GridCell() for _ in range(COL)] for _ in range(ROW)]
 
         # Initialize the start cell details
         i = src[0]
@@ -163,20 +162,30 @@ class CreateWaypoints(smach.State):
     Updating them if robot encountered obstacle.
     """
 
-    def __init__(self, node):
+    def __init__(self, node, q_goal=np.array([4.0, 10.0])):
         smach.State.__init__(self, outcomes=[
-            'update_waypoints',
             'driving_to_goal'
-            ])
+        ])
         self.node = node
+        self.q_goal = q_goal
+
+        # Get robots current position
+        self.odom_sub = self.create_subscription(
+            Odometry,
+            '/odom',
+            self.odom_callback,
+            10,
+        )
 
     def execute(self, userdata):
-        # creating waypoints at the start
-
-        # updating grid and waypoints if obstacle
-
-        # driving to goal
-        return
+        # creating/updating waypoints
+        current_position = FollowWaypoints.odom_sub()
+        waypoints = GridCell.a_star_search(
+            grid=[0][0],
+            src=self.odom_sub,
+            dest=self.q_goal
+        )
+        return 'driving_to_goal'
 
 
 class FollowWaypoints(smach.State):
@@ -193,7 +202,7 @@ class FollowWaypoints(smach.State):
             'goal_reached'
         ])
         self.node = node
-    
+
         # Goal parameters
         self.q_goal = q_goal
         self.theta_goal = theta_goal
@@ -277,6 +286,41 @@ class FollowWaypoints(smach.State):
             with self.lock:
                 self.path_waypoints = msg
 
+    def control_loop(self):
+        """Compute and publish velocity commands."""
+        with self.lock:
+            if self.latest_scan is None:
+                # wait for first scan to arrive
+                return
+
+            self.q_goal = self.path_waypoints[0]
+
+            # Otherwise run potential-field based control
+            obstacles = self.convert_scan_to_obstacles(self.latest_scan)
+
+            # Calculate forces in base_link frame
+            q_base = np.array([0.0, 0.0])  # origin in base_link frame
+            q_goal_base = self.transform_to_base_link(self.q_goal)
+
+            attractive_force = self.calculate_attractive_force(q_base, q_goal_base)
+            repulsive_force = self.calculate_repulsive_force(q_base, obstacles)
+
+            total_force = attractive_force + repulsive_force
+            force_magnitude = np.linalg.norm(total_force)
+
+            twist = Twist()
+            if force_magnitude > 1e-6:
+                force_direction = total_force / force_magnitude
+                linear_vel = np.clip(force_magnitude * self.linear_gain, 0,
+                                     self.max_linear_velocity)
+                twist.linear.x = force_direction[0] * linear_vel
+                angle_to_force = np.arctan2(force_direction[1], force_direction[0])
+                twist.angular.z = np.clip(angle_to_force,
+                                          -self.max_angular_velocity,
+                                          self.max_angular_velocity)
+
+            self.cmd_vel_pub.publish(twist)
+
     def convert_scan_to_obstacles(self, scan):
         """
         Convert laser scan data to obstacle positions in base_link frame.
@@ -304,6 +348,23 @@ class FollowWaypoints(smach.State):
             obstacles.append(np.array([x, y]))
 
         return obstacles
+
+    def transform_to_base_link(self, point_odom):
+        """Transform a point from odom frame to base_link frame."""
+        # Translate to robot position
+        relative_pos = point_odom - self.robot_position
+
+        # Rotate by -robot_angle
+        cos_a = np.cos(-self.robot_angle)
+        sin_a = np.sin(-self.robot_angle)
+
+        rotation_matrix = np.array([
+            [cos_a, -sin_a],
+            [sin_a, cos_a]
+        ])
+
+        point_base = rotation_matrix @ relative_pos
+        return point_base
 
     def calculate_attractive_force(self, q, q_goal):
         """
@@ -347,74 +408,8 @@ class FollowWaypoints(smach.State):
             repulsive_force += self.k_r * term1 * term2 * direction
         return repulsive_force
 
-    def transform_force_to_odom(self, force_base):
-        """
-        Transform force from base_link to odom frame.
-
-        force_base: force vector in base_link frame
-        Returns: force vector in odom frame
-        """
-        # Rotation matrix from base_link to odom
-        cos_a = np.cos(self.robot_angle)
-        sin_a = np.sin(self.robot_angle)
-
-        rotation_matrix = np.array([
-            [cos_a, -sin_a],
-            [sin_a, cos_a]
-        ])
-
-        force_odom = rotation_matrix @ force_base
-        return force_odom
-
-    def control_loop(self):
-        """Compute and publish velocity commands."""
-        with self.lock:
-            self.q_goal = self.path_waypoints[0]
-
-            # Otherwise run potential-field based control
-            obstacles = self.convert_scan_to_obstacles(self.latest_scan)
-
-            # Calculate forces in base_link frame
-            q_base = np.array([0.0, 0.0])  # origin in base_link frame
-            q_goal_base = self.transform_to_base_link(self.q_goal)
-
-            attractive_force = self.calculate_attractive_force(q_base, q_goal_base)
-            repulsive_force = self.calculate_repulsive_force(q_base, obstacles)
-
-            total_force = attractive_force + repulsive_force
-            force_magnitude = np.linalg.norm(total_force)
-
-            twist = Twist()
-            if force_magnitude > 1e-6:
-                force_direction = total_force / force_magnitude
-                linear_vel = np.clip(force_magnitude * self.linear_gain, 0,
-                                     self.max_linear_velocity)
-                twist.linear.x = force_direction[0] * linear_vel
-                angle_to_force = np.arctan2(force_direction[1], force_direction[0])
-                twist.angular.z = np.clip(angle_to_force,
-                                          -self.max_angular_velocity,
-                                          self.max_angular_velocity)
-
-            self.cmd_vel_pub.publish(twist)
-
-    def transform_to_base_link(self, point_odom):
-        """Transform a point from odom frame to base_link frame."""
-        # Translate to robot position
-        relative_pos = point_odom - self.robot_position
-
-        # Rotate by -robot_angle
-        cos_a = np.cos(-self.robot_angle)
-        sin_a = np.sin(-self.robot_angle)
-
-        rotation_matrix = np.array([
-            [cos_a, -sin_a],
-            [sin_a, cos_a]
-        ])
-
-        point_base = rotation_matrix @ relative_pos
-        return point_base
-
     def check_if_waypoint_in_obstacle(self):
+        """Check if there is an obstacle in the next waypoint."""
         epsilon = (0.1, 0.1, 0.1)
         if self.path_waypoints[0] - self.convert_scan_to_obstacles(self.latest_scan) < epsilon:
             return False
@@ -427,6 +422,7 @@ class FollowWaypoints(smach.State):
         if next_waypoint_pose - current_robot_position < epsilon:
             del self.path_waypoints[0]
             if len(self.path_waypoints) == 0:
+                self.get_logger().info('Goal reached. Stopping robot.')
                 return 'goal_reached'
             if self.check_if_waypoint_in_obstacle():
                 return 'obstacle_encountered'
@@ -491,7 +487,6 @@ def main(args=None):
             'CREATE WAYPOINTS',
             CreateWaypoints(node),
             transitions={
-                'calculate_waypoints',
                 'driving_to_goal'
             }
         )
