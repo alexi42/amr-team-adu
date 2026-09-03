@@ -1,15 +1,15 @@
 import rclpy
-import numpy as np
+import smach
 import tf2_ros
+import numpy as np
+import threading
+import heapq
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry, Path
 from tf_transformations import euler_from_quaternion
 from rclpy.executors import MultiThreadedExecutor
-import threading
-import smach
-import heapq
 
 """
 Adapted code for A*-algorithm found on https://www.geeksforgeeks.org/python/a-search-algorithm-in-python/
@@ -168,14 +168,27 @@ class CreateWaypoints(smach.State):
         ])
         self.node = node
         self.q_goal = q_goal
+        self.lock = threading.Lock()
+        self.robot_position = np.array([-2.0, -3.5])
 
         # Get robots current position
-        self.odom_sub = self.create_subscription(
+        self.odom_sub = self.node.create_subscription(
             Odometry,
             '/odom',
             self.odom_callback,
             10,
         )
+
+    def odom_callback(self, msg):
+        """Update robot pose from odometry."""
+        with self.lock:
+            self.robot_position[0] = msg.pose.pose.position.x
+            self.robot_position[1] = msg.pose.pose.position.y
+
+            # Extract yaw angle from quaternion
+            quat = msg.pose.pose.orientation
+            _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
+            self.robot_angle = yaw
 
     def execute(self, userdata):
         # creating/updating waypoints
@@ -228,24 +241,24 @@ class FollowWaypoints(smach.State):
 
         # TF2
         self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.node)
 
         # Subscribers
-        self.scan_sub = self.create_subscription(
+        self.scan_sub = self.node.create_subscription(
             LaserScan,
             '/scan',
             self.scan_callback,
             10,
         )
 
-        self.odom_sub = self.create_subscription(
+        self.odom_sub = self.node.create_subscription(
             Odometry,
             '/odom',
             self.odom_callback,
             10,
         )
 
-        self.path_sub = self.create_subscription(
+        self.path_sub = self.node.create_subscription(
             Path,
             '/path',
             self.path_callback,
@@ -253,14 +266,14 @@ class FollowWaypoints(smach.State):
         )
 
         # Publisher
-        self.cmd_vel_pub = self.create_publisher(
+        self.cmd_vel_pub = self.node.create_publisher(
             Twist,
             '/cmd_vel',
             10
         )
 
         # Control loop timer
-        self.timer = self.create_timer(
+        self.timer = self.node.create_timer(
             0.1,  # 10 Hz
             self.control_loop,
         )
@@ -487,17 +500,17 @@ def main(args=None):
             'CREATE WAYPOINTS',
             CreateWaypoints(node),
             transitions={
-                'driving_to_goal'
+                'driving_to_goal': 'FOLLOW WAYPOINTS'
             }
         )
 
         smach.StateMachine.add(
             'FOLLOW WAYPOINTS',
             FollowWaypoints(node),
-            transations={
-                'driving_to_goal',
-                'obstacle_encountered',
-                'goal_reached'
+            transitions={
+                'driving_to_goal': 'FOLLOW WAYPOINTS',
+                'obstacle_encountered': 'CREATE WAYPOINTS',
+                'goal_reached': 'GOAL REACHED'
             }
         )
 
@@ -505,8 +518,8 @@ def main(args=None):
             'GOAL REACHED',
             GoalReached(node),
             transitions={
-                'turning_to_given_orientation',
-                'orientation_reached'
+                'turning_to_given_orientation': 'GOAL REACHED',
+                'orientation_reached': 'GOAL REACHED'
             }
         )
 
@@ -517,7 +530,8 @@ def main(args=None):
     state_thread = threading.Thread(target=sm.execute)
     state_thread.start()
 
-    executor.spin()
+    while True:
+        executor.spin_once()
 
 
 if __name__ == '__main__':
