@@ -192,7 +192,7 @@ class CreateWaypoints(smach.State):
 
     def execute(self, userdata):
         # creating/updating waypoints
-        current_position = FollowWaypoints.odom_sub()
+        current_position = self.robot_position.copy()
         waypoints = GridCell.a_star_search(
             grid=[0][0],
             src=self.odom_sub,
@@ -295,15 +295,21 @@ class FollowWaypoints(smach.State):
             self.robot_angle = yaw
 
     def path_callback(self, msg):
-            """Store latest path data."""
-            with self.lock:
-                self.path_waypoints = msg
+        """Store path poses as two-dimensional waypoint coordinates."""
+        with self.lock:
+            self.path_waypoints = [
+                np.array([
+                    pose.pose.position.x,
+                    pose.pose.position.y,
+                ])
+                for pose in msg.poses
+            ]
 
     def control_loop(self):
         """Compute and publish velocity commands."""
         with self.lock:
-            if self.latest_scan is None:
-                # wait for first scan to arrive
+            if self.latest_scan is None or not self.path_waypoints:
+                # Wait for both a scan and a non-empty path.
                 return
 
             self.q_goal = self.path_waypoints[0]
