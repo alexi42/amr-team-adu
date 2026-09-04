@@ -18,7 +18,8 @@ Adapted code for A*-algorithm found on https://www.geeksforgeeks.org/python/a-se
 # Grid size
 ROW = 400
 COL = 400
-
+RESOLUTION = 0.01
+START = (0, 0)
 
 class GridCell():
     """
@@ -40,9 +41,9 @@ class GridCell():
     def is_valid(self, row, col):
         return (row>=0) and (row < ROW) and (col>=0) and (col < COL)
 
-    # check if the given cell is free
+    # check if the given cell is free, 1 = occupied, 0 = free
     def is_available(self, grid, row, col):
-        return grid[row][col] == 1
+        return grid[row][col] == 0
 
     # check if the provided cell is the destination
     def is_destination(self, row, col, dest):
@@ -73,14 +74,17 @@ class GridCell():
         path.reverse()
         return path
 
-    def convert_world_coordinates_to_grid(coord):
-        # TODO: implement
-        return
+    # converting from world coordinates to the custom grid
+    def convert_world_coordinates_to_grid(self, coord):
+        x, y = coord
+
+        col = int(np.floor((x - START[0]) / RESOLUTION))
+        row = int(np.floor((y - START[1]) / RESOLUTION))
+        return row, col
 
     def a_star_search(self, grid, src, dest):
         # check if source and destination are valid
 
-        # TODO: convert world coordinates into occupancy grid
         src_grid = self.convert_world_coordinates_to_grid(src)
         dest_grid = self.convert_world_coordinates_to_grid(dest)
 
@@ -89,7 +93,7 @@ class GridCell():
             return
 
         # check if we are already at destination
-        if self.is_destination(src[0], src[1], dest):
+        if self.is_destination(src_grid[0], src_grid[1], dest_grid):
             print("We are lready at destination.")
             return
 
@@ -99,8 +103,8 @@ class GridCell():
         cell_details = [[GridCell() for _ in range(COL)] for _ in range(ROW)]
 
         # Initialize the start cell details
-        i = src[0]
-        j = src[1]
+        i = src_grid[0]
+        j = src_grid[1]
         cell_details[i][j].f = 0
         cell_details[i][j].g = 0
         cell_details[i][j].h = 0
@@ -115,6 +119,7 @@ class GridCell():
         found_dest = False
 
         # Main loop of A* search algorithm
+        print(len(open_list))
         while len(open_list) > 0:
             # Pop the cell with the smallest f value from the open list
             p = heapq.heappop(open_list)
@@ -132,23 +137,22 @@ class GridCell():
             for dir in directions:
                 new_i = i + dir[0]
                 new_j = j + dir[1]
-
                 # If the successor is valid, unblocked, and not visited
                 if self.is_valid(new_i, new_j) and self.is_available(grid, new_i, new_j) and not closed_list[new_i][new_j]:
                     # If the successor is the destination
-                    if self.is_destination(new_i, new_j, dest):
+                    if self.is_destination(new_i, new_j, dest_grid):
                         # Set the parent of the destination cell
                         cell_details[new_i][new_j].parent_i = i
                         cell_details[new_i][new_j].parent_j = j
                         print("The destination cell is found")
                         # Trace and print the path from source to destination
-                        self.trace_path(cell_details, dest)
+                        self.trace_path(cell_details, dest_grid)
                         found_dest = True
                         return
                     else:
                         # Calculate the new f, g, and h values
                         g_new = cell_details[i][j].g + 1.0
-                        h_new = self.calculate_h_value(new_i, new_j, dest)
+                        h_new = self.calculate_h_value(new_i, new_j, dest_grid)
                         f_new = g_new + h_new
 
                         # If the cell is not in the open list or the new f value is smaller
@@ -173,21 +177,38 @@ class CreateWaypoints(smach.State):
     Updating them if robot encountered obstacle.
     """
 
-    def __init__(self, node, q_goal=np.array([4.0, 10.0])):
+    def __init__(self, node, q_goal=np.array([3.9, 3.9])):
         smach.State.__init__(self, outcomes=[
             'driving_to_goal'
         ])
         self.node = node
         self.q_goal = q_goal
         self.lock = threading.Lock()
-        self.robot_position = np.array([-2.0, -3.5])
+        self.robot_position = np.array([2.0, 2.0])
+        START = self.robot_position
+        self.waypoints = None
+        self.latest_scan = None
 
-        # Get robots current position
+        # Subscriber to get robots current position
         self.odom_sub = self.node.create_subscription(
             Odometry,
             '/odom',
             self.odom_callback,
             10,
+        )
+
+        self.scan_sub = self.node.create_subscription(
+            LaserScan,
+            '/scan',
+            self.scan_callback,
+            10,
+        )
+
+        # Publisher to pass waypoints
+        self.path = self.node.create_publisher(
+            Path,
+            '/path',
+            10
         )
 
     def odom_callback(self, msg):
@@ -201,12 +222,19 @@ class CreateWaypoints(smach.State):
             _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
             self.robot_angle = yaw
 
+    def scan_callback(self, msg):
+        """Store latest laser scan data."""
+        with self.lock:
+            self.latest_scan = msg
+
     def execute(self, userdata):
-        # creating/updating waypoints
+        """ Create waypoints or update them after encountering new obstacle."""
         gridcell = GridCell()
-        grid = [[0]*ROW]*COL
         current_position = self.robot_position.copy()
-        waypoints = gridcell.a_star_search(
+
+        scan = self.latest_scan
+        grid = FollowWaypoints(self.node).obstacles_to_grid(scan)
+        self.waypoints = gridcell.a_star_search(
             grid=grid,
             src=current_position,
             dest=self.q_goal
@@ -255,6 +283,9 @@ class FollowWaypoints(smach.State):
         # TF2
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self.node)
+
+        # Obstacles
+        self.obstacles = None
 
         # Subscribers
         self.scan_sub = self.node.create_subscription(
@@ -329,6 +360,7 @@ class FollowWaypoints(smach.State):
 
             # Otherwise run potential-field based control
             obstacles = self.convert_scan_to_obstacles(self.latest_scan)
+            self.obstacles = obstacles
 
             # Calculate forces in base_link frame
             q_base = np.array([0.0, 0.0])  # origin in base_link frame
@@ -380,6 +412,27 @@ class FollowWaypoints(smach.State):
             obstacles.append(np.array([x, y]))
 
         return obstacles
+
+    def obstacles_to_grid(self, scan):
+        grid = [[0 for _ in range(COL)] for _ in range(ROW)]
+
+        for obstacle_base in self.convert_scan_to_obstacles(scan):
+            cos_yaw = np.cos(self.robot_angle)
+            sin_yaw = np.sin(self.robot_angle)
+
+            obstacle_world = self.robot_position + np.array([
+                cos_yaw * obstacle_base[0] - sin_yaw * obstacle_base[1],
+                sin_yaw * obstacle_base[0] + cos_yaw * obstacle_base[1],
+            ])
+
+            row, col = GridCell().convert_world_coordinates_to_grid(
+                obstacle_world
+            )
+
+            if 0 <= row < ROW and 0 <= col < COL:
+                grid[row][col] = 1
+
+        return grid
 
     def transform_to_base_link(self, point_odom):
         """Transform a point from odom frame to base_link frame."""
@@ -449,9 +502,9 @@ class FollowWaypoints(smach.State):
 
     def execute(self, userdata):
         current_robot_position = self.robot_position
-        next_waypoint_pose = self.path_waypoints[1]
+        next_waypoint = self.path_waypoints[0]
         epsilon = (0.01, 0.01, 0.01)
-        if next_waypoint_pose - current_robot_position < epsilon:
+        if next_waypoint - current_robot_position < epsilon:
             del self.path_waypoints[0]
             if len(self.path_waypoints) == 0:
                 self.get_logger().info('Goal reached. Stopping robot.')
