@@ -37,23 +37,23 @@ class GridCell():
         self.h = 0
 
     # check if the provided cell is valid
-    def is_valid(row, col):
+    def is_valid(self, row, col):
         return (row>=0) and (row < ROW) and (col>=0) and (col < COL)
 
     # check if the given cell is free
-    def is_available(grid, row, col):
+    def is_available(self, grid, row, col):
         return grid[row][col] == 1
 
     # check if the provided cell is the destination
-    def is_destination(row, col, dest):
+    def is_destination(self, row, col, dest):
         return row == dest[0] and col == dest[1]
 
     # calculate heuristic value as euclidean distance
-    def calculate_h_value(row, col, dest):
+    def calculate_h_value(self, row, col, dest):
         return ((row - dest[0]) ** 2 + (col - dest[1]) ** 2) ** 0.5
 
     # trace the path from the start to the destination
-    def trace_path(cell_details, dest):
+    def trace_path(self, cell_details, dest):
         # print("The path is")
         path = []
         row = dest[0]
@@ -71,10 +71,20 @@ class GridCell():
         path.append((row, col))
         # Reverse the path to get the path from source to destination
         path.reverse()
+        return path
+
+    def convert_world_coordinates_to_grid(coord):
+        # TODO: implement
+        return
 
     def a_star_search(self, grid, src, dest):
         # check if source and destination are valid
-        if not self.is_valid(src[0], src[1]) or not self.is_valid(dest[0], dest[1]):
+
+        # TODO: convert world coordinates into occupancy grid
+        src_grid = self.convert_world_coordinates_to_grid(src)
+        dest_grid = self.convert_world_coordinates_to_grid(dest)
+
+        if not self.is_valid(src_grid[0], src_grid[1]) or not self.is_valid(dest_grid[0], dest_grid[1]):
             print("Source or destination is invalid.")
             return
 
@@ -156,6 +166,7 @@ class GridCell():
         if not found_dest:
             print("Failed to find the destination cell")
 
+
 class CreateWaypoints(smach.State):
     """
     Creating waypoints at the start.
@@ -192,10 +203,12 @@ class CreateWaypoints(smach.State):
 
     def execute(self, userdata):
         # creating/updating waypoints
+        gridcell = GridCell()
+        grid = [[0]*ROW]*COL
         current_position = self.robot_position.copy()
-        waypoints = GridCell.a_star_search(
-            grid=[0][0],
-            src=self.odom_sub,
+        waypoints = gridcell.a_star_search(
+            grid=grid,
+            src=current_position,
             dest=self.q_goal
         )
         return 'driving_to_goal'
