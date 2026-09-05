@@ -6,7 +6,7 @@ import threading
 import heapq
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, PoseStamped, Pose, Point
 from nav_msgs.msg import Odometry, Path
 from tf_transformations import euler_from_quaternion
 from rclpy.executors import MultiThreadedExecutor
@@ -16,10 +16,10 @@ Adapted code for A*-algorithm found on https://www.geeksforgeeks.org/python/a-se
 """
 
 # Grid size
-ROW = 400
-COL = 400
+ROW = 800
+COL = 800
 RESOLUTION = 0.01
-START = (0, 0)
+START = None  # Will be initialized from first odometry reading
 
 class GridCell():
     """
@@ -77,6 +77,9 @@ class GridCell():
     # converting from world coordinates to the custom grid
     def convert_world_coordinates_to_grid(self, coord):
         x, y = coord
+        
+        if START is None:
+            return None, None
 
         col = int(np.floor((x - START[0]) / RESOLUTION))
         row = int(np.floor((y - START[1]) / RESOLUTION))
@@ -84,10 +87,20 @@ class GridCell():
 
     def a_star_search(self, grid, src, dest):
         # check if source and destination are valid
+        
+        if START is None:
+            print("START not initialized yet. Waiting for odometry...")
+            return
 
         src_grid = self.convert_world_coordinates_to_grid(src)
         dest_grid = self.convert_world_coordinates_to_grid(dest)
 
+        print('src pos: ', src)
+        print('dest_pos: ', dest)
+        print('src_grid: ', src_grid)
+        print('dest_grid', dest_grid)
+        print('GRID ROWS: ', ROW)
+        print('GRID COLS: ', COL)
         if not self.is_valid(src_grid[0], src_grid[1]) or not self.is_valid(dest_grid[0], dest_grid[1]):
             print("Source or destination is invalid.")
             return
@@ -146,9 +159,8 @@ class GridCell():
                         cell_details[new_i][new_j].parent_j = j
                         print("The destination cell is found")
                         # Trace and print the path from source to destination
-                        self.trace_path(cell_details, dest_grid)
                         found_dest = True
-                        return
+                        return self.trace_path(cell_details, dest_grid)
                     else:
                         # Calculate the new f, g, and h values
                         g_new = cell_details[i][j].g + 1.0
@@ -179,13 +191,13 @@ class CreateWaypoints(smach.State):
 
     def __init__(self, node, q_goal=np.array([3.9, 3.9])):
         smach.State.__init__(self, outcomes=[
+            'create_waypoints',
             'driving_to_goal'
         ])
         self.node = node
         self.q_goal = q_goal
         self.lock = threading.Lock()
-        self.robot_position = np.array([2.0, 2.0])
-        START = self.robot_position
+        self.robot_position = np.array([0.3, -3.5])
         self.waypoints = None
         self.latest_scan = None
 
@@ -213,9 +225,16 @@ class CreateWaypoints(smach.State):
 
     def odom_callback(self, msg):
         """Update robot pose from odometry."""
+        global START
         with self.lock:
             self.robot_position[0] = msg.pose.pose.position.x
             self.robot_position[1] = msg.pose.pose.position.y
+            print('odometry: ', self.robot_position)
+            
+            # Initialize START from first odometry reading to handle floating-point precision
+            if START is None:
+                START = (self.robot_position[0], self.robot_position[1])
+                print(f"Initialized START to: {START}")
 
             # Extract yaw angle from quaternion
             quat = msg.pose.pose.orientation
@@ -227,11 +246,25 @@ class CreateWaypoints(smach.State):
         with self.lock:
             self.latest_scan = msg
 
+    def convert_grid_coordinates_to_world(self, coord):
+        x, y = coord
+        
+        if START is None:
+            return None, None
+
+        col = x * RESOLUTION + START[0]
+        row = y * RESOLUTION + START[1]
+        return row, col
+
     def execute(self, userdata):
         """ Create waypoints or update them after encountering new obstacle."""
         gridcell = GridCell()
         current_position = self.robot_position.copy()
 
+        if self.latest_scan is None:
+            print('scan is empty')
+            return 'create_waypoints'
+        print('scan is not empty')
         scan = self.latest_scan
         grid = FollowWaypoints(self.node).obstacles_to_grid(scan)
         self.waypoints = gridcell.a_star_search(
@@ -239,6 +272,25 @@ class CreateWaypoints(smach.State):
             src=current_position,
             dest=self.q_goal
         )
+
+        self.waypoints = [self.convert_grid_coordinates_to_world(w) for w in self.waypoints]
+
+        if self.waypoints is None:
+            return 'create_waypoints'
+        
+        waypoint_poses = []
+        for w in self.waypoints:
+            point = Point()
+            point.x, point.y = w
+            pose = Pose()
+            pose.position = point
+            pose_stamped = PoseStamped()
+            pose_stamped.pose = pose
+            waypoint_poses.append(pose_stamped)
+
+        path_msg = Path()
+        path_msg.poses = waypoint_poses
+        self.path.publish(path_msg)
         return 'driving_to_goal'
 
 
@@ -253,7 +305,8 @@ class FollowWaypoints(smach.State):
         smach.State.__init__(self, outcomes=[
             'driving_to_goal',
             'obstacle_encountered',
-            'goal_reached'
+            'goal_reached',
+            'create_waypoints'
         ])
         self.node = node
 
@@ -274,7 +327,7 @@ class FollowWaypoints(smach.State):
         self.linear_gain = 0.8  # scale factor from force magnitude to linear velocity
 
         # Robot state
-        self.robot_position = np.array([-2.0, -3.5])
+        self.robot_position = np.array([0.3, -3.5])
         self.robot_angle = 0.0
         self.latest_scan = None
         self.path_waypoints = None
@@ -329,9 +382,15 @@ class FollowWaypoints(smach.State):
 
     def odom_callback(self, msg):
         """Update robot pose from odometry."""
+        global START
         with self.lock:
             self.robot_position[0] = msg.pose.pose.position.x
             self.robot_position[1] = msg.pose.pose.position.y
+
+            # Initialize START from first odometry reading to handle floating-point precision
+            if START is None:
+                START = (self.robot_position[0], self.robot_position[1])
+                print(f"Initialized START to: {START}")
 
             # Extract yaw angle from quaternion
             quat = msg.pose.pose.orientation
@@ -502,9 +561,11 @@ class FollowWaypoints(smach.State):
 
     def execute(self, userdata):
         current_robot_position = self.robot_position
+        if self.path_waypoints is None:
+            return 'create_waypoints'
         next_waypoint = self.path_waypoints[0]
-        epsilon = (0.01, 0.01, 0.01)
-        if next_waypoint - current_robot_position < epsilon:
+        epsilon = (0.01, 0.01)
+        if (next_waypoint - current_robot_position < epsilon).all():
             del self.path_waypoints[0]
             if len(self.path_waypoints) == 0:
                 self.get_logger().info('Goal reached. Stopping robot.')
@@ -572,6 +633,7 @@ def main(args=None):
             'CREATE WAYPOINTS',
             CreateWaypoints(node),
             transitions={
+                'create_waypoints': 'CREATE WAYPOINTS',
                 'driving_to_goal': 'FOLLOW WAYPOINTS'
             }
         )
@@ -582,7 +644,8 @@ def main(args=None):
             transitions={
                 'driving_to_goal': 'FOLLOW WAYPOINTS',
                 'obstacle_encountered': 'CREATE WAYPOINTS',
-                'goal_reached': 'GOAL REACHED'
+                'goal_reached': 'GOAL REACHED',
+                'create_waypoints': 'CREATE WAYPOINTS'
             }
         )
 
@@ -602,8 +665,16 @@ def main(args=None):
     state_thread = threading.Thread(target=sm.execute)
     state_thread.start()
 
-    while True:
-        executor.spin_once()
+    # while True:
+    #     executor.spin_once()
+
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
