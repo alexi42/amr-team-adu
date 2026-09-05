@@ -95,12 +95,6 @@ class GridCell():
         src_grid = self.convert_world_coordinates_to_grid(src)
         dest_grid = self.convert_world_coordinates_to_grid(dest)
 
-        print('src pos: ', src)
-        print('dest_pos: ', dest)
-        print('src_grid: ', src_grid)
-        print('dest_grid', dest_grid)
-        print('GRID ROWS: ', ROW)
-        print('GRID COLS: ', COL)
         if not self.is_valid(src_grid[0], src_grid[1]) or not self.is_valid(dest_grid[0], dest_grid[1]):
             print("Source or destination is invalid.")
             return
@@ -132,7 +126,6 @@ class GridCell():
         found_dest = False
 
         # Main loop of A* search algorithm
-        print(len(open_list))
         while len(open_list) > 0:
             # Pop the cell with the smallest f value from the open list
             p = heapq.heappop(open_list)
@@ -229,12 +222,10 @@ class CreateWaypoints(smach.State):
         with self.lock:
             self.robot_position[0] = msg.pose.pose.position.x
             self.robot_position[1] = msg.pose.pose.position.y
-            print('odometry: ', self.robot_position)
             
             # Initialize START from first odometry reading to handle floating-point precision
             if START is None:
                 START = (self.robot_position[0], self.robot_position[1])
-                print(f"Initialized START to: {START}")
 
             # Extract yaw angle from quaternion
             quat = msg.pose.pose.orientation
@@ -262,9 +253,7 @@ class CreateWaypoints(smach.State):
         current_position = self.robot_position.copy()
 
         if self.latest_scan is None:
-            print('scan is empty')
             return 'create_waypoints'
-        print('scan is not empty')
         scan = self.latest_scan
         grid = FollowWaypoints(self.node).obstacles_to_grid(scan)
         self.waypoints = gridcell.a_star_search(
@@ -273,11 +262,11 @@ class CreateWaypoints(smach.State):
             dest=self.q_goal
         )
 
-        self.waypoints = [self.convert_grid_coordinates_to_world(w) for w in self.waypoints]
-
         if self.waypoints is None:
             return 'create_waypoints'
-        
+
+        self.waypoints = [self.convert_grid_coordinates_to_world(w) for w in self.waypoints]
+
         waypoint_poses = []
         for w in self.waypoints:
             point = Point()
@@ -390,7 +379,6 @@ class FollowWaypoints(smach.State):
             # Initialize START from first odometry reading to handle floating-point precision
             if START is None:
                 START = (self.robot_position[0], self.robot_position[1])
-                print(f"Initialized START to: {START}")
 
             # Extract yaw angle from quaternion
             quat = msg.pose.pose.orientation
@@ -413,7 +401,7 @@ class FollowWaypoints(smach.State):
         with self.lock:
             if self.latest_scan is None or not self.path_waypoints:
                 # Wait for both a scan and a non-empty path.
-                return
+                return 'create_waypoints'
 
             self.q_goal = self.path_waypoints[0]
 
@@ -553,11 +541,25 @@ class FollowWaypoints(smach.State):
         return repulsive_force
 
     def check_if_waypoint_in_obstacle(self):
-        """Check if there is an obstacle in the next waypoint."""
-        epsilon = (0.1, 0.1, 0.1)
-        if self.path_waypoints[0] - self.convert_scan_to_obstacles(self.latest_scan) < epsilon:
+        """
+        Check if the next waypoint is in an obstacle.
+        Returns True if waypoint is too close to any obstacle, False otherwise.
+        """
+        if self.path_waypoints is None or len(self.path_waypoints) == 0:
             return False
-        return True
+        
+        waypoint = self.path_waypoints[0]
+        epsilon = 0.1  # Distance threshold in meters
+        
+        obstacles = self.convert_scan_to_obstacles(self.latest_scan)
+        
+        # Check if waypoint is within epsilon distance of any obstacle
+        for obstacle in obstacles:
+            obstacle_grid = GridCell().convert_world_coordinates_to_grid(obstacle)
+            distance = waypoint - obstacle_grid
+            if distance < epsilon:
+                return True
+        return False
 
     def execute(self, userdata):
         current_robot_position = self.robot_position
@@ -573,6 +575,7 @@ class FollowWaypoints(smach.State):
             if self.check_if_waypoint_in_obstacle():
                 return 'obstacle_encountered'
             return 'driving_to_goal'
+        return 'driving_to_goal'
 
 
 class GoalReached(smach.State):
