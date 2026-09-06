@@ -18,7 +18,7 @@ Adapted code for A*-algorithm found on https://www.geeksforgeeks.org/python/a-se
 # Grid size
 ROW = 800
 COL = 800
-RESOLUTION = 0.01
+RESOLUTION = 0.25
 START = None  # Will be initialized from first odometry reading
 
 class GridCell():
@@ -81,8 +81,8 @@ class GridCell():
         if START is None:
             return None, None
 
-        col = int(np.floor((x - START[0]) / RESOLUTION))
-        row = int(np.floor((y - START[1]) / RESOLUTION))
+        row = int(np.floor((x - START[0]) / RESOLUTION))
+        col = int(np.floor((y - START[1]) / RESOLUTION))
         return row, col
 
     def a_star_search(self, grid, src, dest):
@@ -243,14 +243,14 @@ class CreateWaypoints(smach.State):
         if START is None:
             return None, None
 
-        col = x * RESOLUTION + START[0]
-        row = y * RESOLUTION + START[1]
+        row = x * RESOLUTION + START[0]
+        col = y * RESOLUTION + START[1]
         return row, col
 
     def execute(self, userdata):
         """ Create waypoints or update them after encountering new obstacle."""
         gridcell = GridCell()
-        current_position = self.robot_position.copy()
+        current_position = self.robot_position
 
         if self.latest_scan is None:
             return 'create_waypoints'
@@ -287,7 +287,7 @@ class FollowWaypoints(smach.State):
     """
     State to follow waypoints.
     """
-    def __init__(self, node, q_goal=np.array([4.0, 10.0]), theta_goal=-1.0,
+    def __init__(self, node, theta_goal=-1.0,
                  goal_distance_threshold=0.1, goal_angle_threshold=0.1,
                  k_a=0.9, k_r=0.7, rho_0=0.8,
                  max_linear_velocity=0.5, max_angular_velocity=0.8):
@@ -300,7 +300,7 @@ class FollowWaypoints(smach.State):
         self.node = node
 
         # Goal parameters
-        self.q_goal = q_goal
+        self.q_goal = None
         self.theta_goal = theta_goal
         self.goal_distance_threshold = goal_distance_threshold
         self.goal_angle_threshold = goal_angle_threshold
@@ -358,12 +358,6 @@ class FollowWaypoints(smach.State):
             10
         )
 
-        # Control loop timer
-        self.timer = self.node.create_timer(
-            0.1,  # 10 Hz
-            self.control_loop,
-        )
-
     def scan_callback(self, msg):
         """Store latest laser scan data."""
         with self.lock:
@@ -395,6 +389,8 @@ class FollowWaypoints(smach.State):
                 ])
                 for pose in msg.poses
             ]
+            # delete first waypoint since it is the robot's current position
+            del self.path_waypoints[0]
 
     def control_loop(self):
         """Compute and publish velocity commands."""
@@ -547,16 +543,13 @@ class FollowWaypoints(smach.State):
         """
         if self.path_waypoints is None or len(self.path_waypoints) == 0:
             return False
-        
         waypoint = self.path_waypoints[0]
         epsilon = 0.1  # Distance threshold in meters
-        
         obstacles = self.convert_scan_to_obstacles(self.latest_scan)
-        
         # Check if waypoint is within epsilon distance of any obstacle
         for obstacle in obstacles:
             obstacle_grid = GridCell().convert_world_coordinates_to_grid(obstacle)
-            distance = waypoint - obstacle_grid
+            distance = np.linalg.norm(waypoint - obstacle_grid)
             if distance < epsilon:
                 return True
         return False
@@ -566,15 +559,16 @@ class FollowWaypoints(smach.State):
         if self.path_waypoints is None:
             return 'create_waypoints'
         next_waypoint = self.path_waypoints[0]
-        epsilon = (0.01, 0.01)
-        if (next_waypoint - current_robot_position < epsilon).all():
+        epsilon = 0.15
+
+        if np.linalg.norm(next_waypoint - current_robot_position) < epsilon:
             del self.path_waypoints[0]
             if len(self.path_waypoints) == 0:
                 self.get_logger().info('Goal reached. Stopping robot.')
                 return 'goal_reached'
             if self.check_if_waypoint_in_obstacle():
                 return 'obstacle_encountered'
-            return 'driving_to_goal'
+        self.control_loop()
         return 'driving_to_goal'
 
 
