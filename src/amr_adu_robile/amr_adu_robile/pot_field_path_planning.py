@@ -541,16 +541,19 @@ class FollowWaypoints(smach.State):
         Check if the next waypoint is in an obstacle.
         Returns True if waypoint is too close to any obstacle, False otherwise.
         """
-        if self.path_waypoints is None or len(self.path_waypoints) == 0:
+        if (self.path_waypoints is None or len(self.path_waypoints) == 0
+                or self.latest_scan is None):
             return False
+
+        # Saving next waypoint in the base link frame as well 
+        # to compare it to the obstacle coordinate
         waypoint = self.path_waypoints[0]
-        epsilon = 0.1  # Distance threshold in meters
+        waypoint_base = self.transform_to_base_link(waypoint)
+        epsilon = 0.5  # Distance threshold to obstacles in meters
         obstacles = self.convert_scan_to_obstacles(self.latest_scan)
         # Check if waypoint is within epsilon distance of any obstacle
         for obstacle in obstacles:
-            obstacle_grid = GridCell().convert_world_coordinates_to_grid(obstacle)
-            distance = np.linalg.norm(waypoint - obstacle_grid)
-            if distance < epsilon:
+            if np.linalg.norm(waypoint_base - obstacle) < epsilon:
                 return True
         return False
 
@@ -569,8 +572,9 @@ class FollowWaypoints(smach.State):
                 self.cmd_vel_pub.publish(twist)
                 print('Goal reached. Stopping robot.')
                 return 'goal_reached'
-            if self.check_if_waypoint_in_obstacle():
-                return 'obstacle_encountered'
+        if self.check_if_waypoint_in_obstacle():
+            print('Obstacle was encountered')
+            return 'obstacle_encountered'
         self.control_loop()
         return 'driving_to_goal'
 
@@ -690,9 +694,6 @@ def main(args=None):
     # Execute state machine in a separate thread
     state_thread = threading.Thread(target=sm.execute)
     state_thread.start()
-
-    # while True:
-    #     executor.spin_once()
 
     try:
         executor.spin()
