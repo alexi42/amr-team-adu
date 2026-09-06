@@ -561,10 +561,13 @@ class FollowWaypoints(smach.State):
         next_waypoint = self.path_waypoints[0]
         epsilon = 0.15
 
+        twist = Twist()
         if np.linalg.norm(next_waypoint - current_robot_position) < epsilon:
             del self.path_waypoints[0]
             if len(self.path_waypoints) == 0:
-                self.get_logger().info('Goal reached. Stopping robot.')
+                twist.linear.x = 0.0
+                self.cmd_vel_pub.publish(twist)
+                print('Goal reached. Stopping robot.')
                 return 'goal_reached'
             if self.check_if_waypoint_in_obstacle():
                 return 'obstacle_encountered'
@@ -575,35 +578,61 @@ class FollowWaypoints(smach.State):
 class GoalReached(smach.State):
     """Robot reached goal and turns into given pose."""
 
-    def __init__(self, node, theta_goal=-1.0, theta_goal_threshold=0.1):
+    def __init__(self, node, theta_goal=-1.0, theta_goal_threshold=0.1, max_angular_velocity=0.8):
         smach.State.__init__(self, outcomes=[
             'turning_to_given_orientation',
             'orientation_reached'
         ])
         self.node = node
+        self.lock = threading.Lock()
         self.cmd_vel_pub = self.node.create_publisher(Twist, 'cmd_vel', 10)
         self.theta_goal = theta_goal
         self.theta_goal_threshold = theta_goal_threshold
+        self.robot_angle = 0.0
+        self.max_angular_velocity = max_angular_velocity
+
+        # Subscriber
+        self.odom_sub = self.node.create_subscription(
+            Odometry,
+            '/odom',
+            self.odom_callback,
+            10,
+        )
+
+        # Publisher
+        self.cmd_vel_pub = self.node.create_publisher(
+            Twist,
+            '/cmd_vel',
+            10
+        )
+
+    def odom_callback(self, msg):
+        """Update robot pose from odometry."""
+        with self.lock:
+
+            # Extract yaw angle from quaternion
+            quat = msg.pose.pose.orientation
+            _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
+            self.robot_angle = yaw
 
     def execute(self, userdata):
         angle_error = self.calculate_angle_error(self.theta_goal)
         twist = Twist()
-        twist.linear.x = 0.0
-        self.cmd_vel_pub.publish(twist)
 
         if abs(angle_error) < self.theta_goal_threshold:
             # Stop when both position and orientation reached
+            twist.angular.z = 0.0
             self.cmd_vel_pub.publish(twist)
+            print('Desired orientation reached.')
             return 'orientation_reached'
-        else:
-            # Rotate to desired orientation only
-            twist.angular.z = np.clip(
-                angle_error,
-                self.max_angular_velocity,
-                self.max_angular_velocity
-            )
-            self.cmd_vel_pub.publish(twist)
-            return 'turning_to_given_orientation'
+        # Rotate to desired orientation
+        twist.angular.z = np.clip(
+            angle_error,
+            -self.max_angular_velocity,
+            self.max_angular_velocity
+        )
+        self.cmd_vel_pub.publish(twist)
+        return 'turning_to_given_orientation'
 
     def calculate_angle_error(self, target_angle):
         """Calculate the smallest angle error between robot orientation and target angle."""
