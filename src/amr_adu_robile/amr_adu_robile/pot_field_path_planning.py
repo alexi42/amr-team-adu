@@ -20,6 +20,7 @@ ROW = 800
 COL = 800
 RESOLUTION = 0.25
 START = None  # Will be initialized from first odometry reading
+grid = [[0 for _ in range(COL)] for _ in range(ROW)]
 
 class GridCell():
     """
@@ -247,6 +248,28 @@ class CreateWaypoints(smach.State):
         col = y * RESOLUTION + START[1]
         return row, col
 
+    def obstacles_to_grid(self, scan):
+        for obstacle_base in FollowWaypoints(self.node).convert_scan_to_obstacles(scan):
+            cos_yaw = np.cos(self.robot_angle)
+            sin_yaw = np.sin(self.robot_angle)
+
+            obstacle_world = self.robot_position + np.array([
+                cos_yaw * obstacle_base[0] - sin_yaw * obstacle_base[1],
+                sin_yaw * obstacle_base[0] + cos_yaw * obstacle_base[1],
+            ])
+
+            row, col = GridCell().convert_world_coordinates_to_grid(
+                obstacle_world
+            )
+            print('Row in grid: ', row, 'Col in grid: ', col)
+            print('Row and col in world: ', self.convert_grid_coordinates_to_world((row, col)))
+            grid_before = grid
+            if 0 <= row < ROW and 0 <= col < COL:
+                print('Obstacles are written into grid')
+                grid[row][col] = 1
+                print('are the obstacles in the same place as before?: ', grid_before[row][col] == grid[row][col])
+        return grid
+
     def execute(self, userdata):
         """ Create waypoints or update them after encountering new obstacle."""
         gridcell = GridCell()
@@ -255,7 +278,7 @@ class CreateWaypoints(smach.State):
         if self.latest_scan is None:
             return 'create_waypoints'
         scan = self.latest_scan
-        grid = FollowWaypoints(self.node).obstacles_to_grid(scan)
+        grid = self.obstacles_to_grid(scan)
         self.waypoints = gridcell.a_star_search(
             grid=grid,
             src=current_position,
@@ -456,27 +479,6 @@ class FollowWaypoints(smach.State):
 
         return obstacles
 
-    def obstacles_to_grid(self, scan):
-        grid = [[0 for _ in range(COL)] for _ in range(ROW)]
-
-        for obstacle_base in self.convert_scan_to_obstacles(scan):
-            cos_yaw = np.cos(self.robot_angle)
-            sin_yaw = np.sin(self.robot_angle)
-
-            obstacle_world = self.robot_position + np.array([
-                cos_yaw * obstacle_base[0] - sin_yaw * obstacle_base[1],
-                sin_yaw * obstacle_base[0] + cos_yaw * obstacle_base[1],
-            ])
-
-            row, col = GridCell().convert_world_coordinates_to_grid(
-                obstacle_world
-            )
-
-            if 0 <= row < ROW and 0 <= col < COL:
-                grid[row][col] = 1
-
-        return grid
-
     def transform_to_base_link(self, point_odom):
         """Transform a point from odom frame to base_link frame."""
         # Translate to robot position
@@ -565,6 +567,9 @@ class FollowWaypoints(smach.State):
         epsilon = 0.15
 
         twist = Twist()
+        if self.check_if_waypoint_in_obstacle():
+            print('Obstacle was encountered')
+            return 'obstacle_encountered'
         if np.linalg.norm(next_waypoint - current_robot_position) < epsilon:
             del self.path_waypoints[0]
             if len(self.path_waypoints) == 0:
@@ -572,9 +577,6 @@ class FollowWaypoints(smach.State):
                 self.cmd_vel_pub.publish(twist)
                 print('Goal reached. Stopping robot.')
                 return 'goal_reached'
-        if self.check_if_waypoint_in_obstacle():
-            print('Obstacle was encountered')
-            return 'obstacle_encountered'
         self.control_loop()
         return 'driving_to_goal'
 
