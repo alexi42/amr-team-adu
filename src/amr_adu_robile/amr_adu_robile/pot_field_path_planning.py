@@ -4,6 +4,10 @@ import tf2_ros
 import numpy as np
 import threading
 import heapq
+import sys
+sys.path.append('/home/alexi/repos/amr-team-adu/src/amr_adu_robile/amr_adu_robile/')
+import conversion_script
+
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist, PoseStamped, Pose, Point
@@ -75,17 +79,6 @@ class GridCell():
         path.reverse()
         return path
 
-    # converting from world coordinates to the custom grid
-    def convert_world_coordinates_to_grid(self, coord):
-        x, y = coord
-        
-        if START is None:
-            return None, None
-
-        row = int(np.floor((x - START[0]) / RESOLUTION))
-        col = int(np.floor((y - START[1]) / RESOLUTION))
-        return row, col
-
     def a_star_search(self, grid, src, dest):
         # check if source and destination are valid
         
@@ -93,8 +86,12 @@ class GridCell():
             print("START not initialized yet. Waiting for odometry...")
             return
 
-        src_grid = self.convert_world_coordinates_to_grid(src)
-        dest_grid = self.convert_world_coordinates_to_grid(dest)
+        src_grid = conversion_script.convert_world_coordinates_to_grid(
+            src, start=START, res=RESOLUTION
+        )
+        dest_grid = conversion_script.convert_world_coordinates_to_grid(
+                    dest, start=START, res=RESOLUTION
+        )
 
         if not self.is_valid(src_grid[0], src_grid[1]) or not self.is_valid(dest_grid[0], dest_grid[1]):
             print("Source or destination is invalid.")
@@ -238,18 +235,8 @@ class CreateWaypoints(smach.State):
         with self.lock:
             self.latest_scan = msg
 
-    def convert_grid_coordinates_to_world(self, coord):
-        x, y = coord
-        
-        if START is None:
-            return None, None
-
-        row = x * RESOLUTION + START[0]
-        col = y * RESOLUTION + START[1]
-        return row, col
-
-    def obstacles_to_grid(self, scan):
-        for obstacle_base in FollowWaypoints(self.node).convert_scan_to_obstacles(scan):
+    def write_obstacles_into_grid(self, scan):
+        for obstacle_base in conversion_script.convert_scan_to_obstacles(self):
             cos_yaw = np.cos(self.robot_angle)
             sin_yaw = np.sin(self.robot_angle)
 
@@ -258,11 +245,13 @@ class CreateWaypoints(smach.State):
                 sin_yaw * obstacle_base[0] + cos_yaw * obstacle_base[1],
             ])
 
-            row, col = GridCell().convert_world_coordinates_to_grid(
-                obstacle_world
+            row, col = conversion_script.convert_world_coordinates_to_grid(
+                obstacle_world,
+                START,
+                RESOLUTION
             )
             print('Row in grid: ', row, 'Col in grid: ', col)
-            print('Row and col in world: ', self.convert_grid_coordinates_to_world((row, col)))
+            print('Row and col in world: ', conversion_script.convert_grid_coordinates_to_world((row, col), start=START, res=RESOLUTION))
             grid_before = grid
             if 0 <= row < ROW and 0 <= col < COL:
                 print('Obstacles are written into grid')
@@ -278,7 +267,7 @@ class CreateWaypoints(smach.State):
         if self.latest_scan is None:
             return 'create_waypoints'
         scan = self.latest_scan
-        grid = self.obstacles_to_grid(scan)
+        grid = self.write_obstacles_into_grid(scan)
         self.waypoints = gridcell.a_star_search(
             grid=grid,
             src=current_position,
@@ -288,7 +277,7 @@ class CreateWaypoints(smach.State):
         if self.waypoints is None:
             return 'create_waypoints'
 
-        self.waypoints = [self.convert_grid_coordinates_to_world(w) for w in self.waypoints]
+        self.waypoints = [conversion_script.convert_grid_coordinates_to_world(w, start=START, res=RESOLUTION) for w in self.waypoints]
 
         waypoint_poses = []
         for w in self.waypoints:
@@ -425,12 +414,12 @@ class FollowWaypoints(smach.State):
             self.q_goal = self.path_waypoints[0]
 
             # Otherwise run potential-field based control
-            obstacles = self.convert_scan_to_obstacles(self.latest_scan)
+            obstacles = conversion_script.convert_scan_to_obstacles(self)
             self.obstacles = obstacles
 
             # Calculate forces in base_link frame
             q_base = np.array([0.0, 0.0])  # origin in base_link frame
-            q_goal_base = self.transform_to_base_link(self.q_goal)
+            q_goal_base = conversion_script.transform_to_base_link(self, self.q_goal)
 
             attractive_force = self.calculate_attractive_force(q_base, q_goal_base)
             repulsive_force = self.calculate_repulsive_force(q_base, obstacles)
@@ -450,51 +439,6 @@ class FollowWaypoints(smach.State):
                                           self.max_angular_velocity)
 
             self.cmd_vel_pub.publish(twist)
-
-    def convert_scan_to_obstacles(self, scan):
-        """
-        Convert laser scan data to obstacle positions in base_link frame.
-        Returns list of obstacle positions as (x, y) in base_link coordinates.
-        """
-
-        obstacles = []
-
-        for i, range_val in enumerate(scan.ranges):
-            # Skip invalid readings
-            if range_val < scan.range_min or range_val > scan.range_max:
-                continue
-
-            # Skip very distant readings (noise)
-            if range_val > self.rho_0 * 2:
-                continue
-
-            # Calculate angle
-            angle = scan.angle_min + i * scan.angle_increment
-
-            # Convert to cartesian coordinates in base_link frame
-            x = range_val * np.cos(angle)
-            y = range_val * np.sin(angle)
-
-            obstacles.append(np.array([x, y]))
-
-        return obstacles
-
-    def transform_to_base_link(self, point_odom):
-        """Transform a point from odom frame to base_link frame."""
-        # Translate to robot position
-        relative_pos = point_odom - self.robot_position
-
-        # Rotate by -robot_angle
-        cos_a = np.cos(-self.robot_angle)
-        sin_a = np.sin(-self.robot_angle)
-
-        rotation_matrix = np.array([
-            [cos_a, -sin_a],
-            [sin_a, cos_a]
-        ])
-
-        point_base = rotation_matrix @ relative_pos
-        return point_base
 
     def calculate_attractive_force(self, q, q_goal):
         """
@@ -550,9 +494,9 @@ class FollowWaypoints(smach.State):
         # Saving next waypoint in the base link frame as well 
         # to compare it to the obstacle coordinate
         waypoint = self.path_waypoints[0]
-        waypoint_base = self.transform_to_base_link(waypoint)
+        waypoint_base = conversion_script.transform_to_base_link(self, waypoint)
         epsilon = 0.5  # Distance threshold to obstacles in meters
-        obstacles = self.convert_scan_to_obstacles(self.latest_scan)
+        obstacles = conversion_script.convert_scan_to_obstacles(self)
         # Check if waypoint is within epsilon distance of any obstacle
         for obstacle in obstacles:
             if np.linalg.norm(waypoint_base - obstacle) < epsilon:
