@@ -45,10 +45,6 @@ def convert_scan_to_obstacles(self):
         if range_val < scan.range_min or range_val > scan.range_max:
             continue
 
-        # Skip very distant readings (noise)
-        if range_val > self.rho_0 * 2:
-            continue
-
         # Calculate angle
         angle = scan.angle_min + i * scan.angle_increment
 
@@ -62,7 +58,7 @@ def convert_scan_to_obstacles(self):
 
 
 def transform_to_base_link(self, point_odom):
-    """Transform a point from odom frame to base_link frame."""
+    """Transform a point from world frame to base_link frame."""
     # Translate to robot position
     relative_pos = point_odom - self.robot_position
 
@@ -77,3 +73,18 @@ def transform_to_base_link(self, point_odom):
 
     point_base = rotation_matrix @ relative_pos
     return point_base
+
+
+def transform_to_world(self, point_base):
+    """Transform a point from base_link frame to world  frame."""
+    # Rotate by robot_angle (positive rotation)
+    cos_a = np.cos(self.robot_angle)
+    sin_a = np.sin(self.robot_angle)
+    rotation_matrix = np.array([
+        [cos_a, -sin_a],
+        [sin_a, cos_a]
+    ])
+
+    # Apply rotation then translation
+    point_world = rotation_matrix @ point_base + self.robot_position
+    return point_world

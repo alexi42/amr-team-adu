@@ -4,16 +4,15 @@ import tf2_ros
 import numpy as np
 import threading
 import heapq
-import sys
-sys.path.append('/home/alexi/repos/amr-team-adu/src/amr_adu_robile/amr_adu_robile/')
-import conversion_script
+from .conversion_script import convert_grid_coordinates_to_world, convert_world_coordinates_to_grid, convert_scan_to_obstacles, transform_to_base_link, transform_to_world
 
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist, PoseStamped, Pose, Point
-from nav_msgs.msg import Odometry, Path
+from nav_msgs.msg import Odometry, Path, OccupancyGrid, MapMetaData
 from tf_transformations import euler_from_quaternion
 from rclpy.executors import MultiThreadedExecutor
+from itertools import chain
 
 """
 Adapted code for A*-algorithm found on https://www.geeksforgeeks.org/python/a-search-algorithm-in-python/
@@ -24,7 +23,6 @@ ROW = 800
 COL = 800
 RESOLUTION = 0.25
 START = None  # Will be initialized from first odometry reading
-grid = [[0 for _ in range(COL)] for _ in range(ROW)]
 
 class GridCell():
     """
@@ -60,7 +58,6 @@ class GridCell():
 
     # trace the path from the start to the destination
     def trace_path(self, cell_details, dest):
-        # print("The path is")
         path = []
         row = dest[0]
         col = dest[1]
@@ -86,11 +83,11 @@ class GridCell():
             print("START not initialized yet. Waiting for odometry...")
             return
 
-        src_grid = conversion_script.convert_world_coordinates_to_grid(
+        src_grid = convert_world_coordinates_to_grid(
             src, start=START, res=RESOLUTION
         )
-        dest_grid = conversion_script.convert_world_coordinates_to_grid(
-                    dest, start=START, res=RESOLUTION
+        dest_grid = convert_world_coordinates_to_grid(
+            dest, start=START, res=RESOLUTION
         )
 
         if not self.is_valid(src_grid[0], src_grid[1]) or not self.is_valid(dest_grid[0], dest_grid[1]):
@@ -191,6 +188,7 @@ class CreateWaypoints(smach.State):
         self.robot_position = np.array([0.3, -3.5])
         self.waypoints = None
         self.latest_scan = None
+        self.occupancy_grid_msg = None
 
         # Subscriber to get robots current position
         self.odom_sub = self.node.create_subscription(
@@ -220,7 +218,7 @@ class CreateWaypoints(smach.State):
         with self.lock:
             self.robot_position[0] = msg.pose.pose.position.x
             self.robot_position[1] = msg.pose.pose.position.y
-            
+
             # Initialize START from first odometry reading to handle floating-point precision
             if START is None:
                 START = (self.robot_position[0], self.robot_position[1])
@@ -235,41 +233,63 @@ class CreateWaypoints(smach.State):
         with self.lock:
             self.latest_scan = msg
 
-    def write_obstacles_into_grid(self, scan):
-        for obstacle_base in conversion_script.convert_scan_to_obstacles(self):
-            cos_yaw = np.cos(self.robot_angle)
-            sin_yaw = np.sin(self.robot_angle)
+    def write_obstacles_into_grid(self):
+        grid = np.zeros((ROW, COL), dtype=np.uint8)
+        if self.latest_scan is not None:
+            for obstacle_base in convert_scan_to_obstacles(self):
 
-            obstacle_world = self.robot_position + np.array([
-                cos_yaw * obstacle_base[0] - sin_yaw * obstacle_base[1],
-                sin_yaw * obstacle_base[0] + cos_yaw * obstacle_base[1],
-            ])
+                obstacle_world = transform_to_world(self, obstacle_base)
 
-            row, col = conversion_script.convert_world_coordinates_to_grid(
-                obstacle_world,
-                START,
-                RESOLUTION
-            )
-            print('Row in grid: ', row, 'Col in grid: ', col)
-            print('Row and col in world: ', conversion_script.convert_grid_coordinates_to_world((row, col), start=START, res=RESOLUTION))
-            grid_before = grid
-            if 0 <= row < ROW and 0 <= col < COL:
-                print('Obstacles are written into grid')
-                grid[row][col] = 1
-                print('are the obstacles in the same place as before?: ', grid_before[row][col] == grid[row][col])
+                row, col = convert_world_coordinates_to_grid(
+                    obstacle_world,
+                    START,
+                    RESOLUTION
+                )
+
+                if 0 <= row < ROW and 0 <= col < COL:
+                    grid[row][col] = 1
+
+                    # Also mark neighbour cells as obstructed
+                    grid[row][col-1] = 1
+                    grid[row][col+1] = 1
+                    grid[row-1][col] = 1
+                    grid[row+1][col] = 1
+
+                    grid[row-1][col-1] = 1
+                    grid[row-1][col+1] = 1
+                    grid[row+1][col-1] = 1
+                    grid[row+1][col+1] = 1
+
         return grid
 
     def execute(self, userdata):
-        """ Create waypoints or update them after encountering new obstacle."""
+        """Create waypoints or update them after encountering new obstacle."""
         gridcell = GridCell()
         current_position = self.robot_position
 
-        if self.latest_scan is None:
+        origin_point = Point()
+        origin_point.x, origin_point.y = current_position
+        origin_pose = Pose()
+        origin_pose.position = origin_point
+
+        map_meta_data_msg = MapMetaData()
+        map_meta_data_msg.resolution = RESOLUTION
+        map_meta_data_msg.width = ROW
+        map_meta_data_msg.height = COL
+        map_meta_data_msg.origin = origin_pose
+
+        occupancy_grid_msg = OccupancyGrid()
+        occupancy_grid_msg.info = map_meta_data_msg
+        grid_two_dim = self.write_obstacles_into_grid()
+        grid_one_dim = [int(i) for i in chain.from_iterable(grid_two_dim)]
+        occupancy_grid_msg.data = grid_one_dim
+        self.occupancy_grid_msg = occupancy_grid_msg
+
+        if START is None or self.latest_scan is None:
             return 'create_waypoints'
-        scan = self.latest_scan
-        grid = self.write_obstacles_into_grid(scan)
+        
         self.waypoints = gridcell.a_star_search(
-            grid=grid,
+            grid=grid_two_dim,
             src=current_position,
             dest=self.q_goal
         )
@@ -277,7 +297,7 @@ class CreateWaypoints(smach.State):
         if self.waypoints is None:
             return 'create_waypoints'
 
-        self.waypoints = [conversion_script.convert_grid_coordinates_to_world(w, start=START, res=RESOLUTION) for w in self.waypoints]
+        self.waypoints = [convert_grid_coordinates_to_world(w, start=START, res=RESOLUTION) for w in self.waypoints]
 
         waypoint_poses = []
         for w in self.waypoints:
@@ -299,9 +319,7 @@ class FollowWaypoints(smach.State):
     """
     State to follow waypoints.
     """
-    def __init__(self, node, theta_goal=-1.0,
-                 goal_distance_threshold=0.1, goal_angle_threshold=0.1,
-                 k_a=0.9, k_r=0.7, rho_0=0.8,
+    def __init__(self, node, k_a=1.0, k_r=0.5, rho_0=0.5,
                  max_linear_velocity=0.5, max_angular_velocity=0.8):
         smach.State.__init__(self, outcomes=[
             'driving_to_goal',
@@ -313,9 +331,6 @@ class FollowWaypoints(smach.State):
 
         # Goal parameters
         self.q_goal = None
-        self.theta_goal = theta_goal
-        self.goal_distance_threshold = goal_distance_threshold
-        self.goal_angle_threshold = goal_angle_threshold
 
         # Potential field parameters
         self.k_a = k_a  # Attractive force gain
@@ -401,7 +416,8 @@ class FollowWaypoints(smach.State):
                 ])
                 for pose in msg.poses
             ]
-            # delete first waypoint since it is the robot's current position
+            # delete first and second waypoint since they are too close to the robot's current position
+            del self.path_waypoints[0]
             del self.path_waypoints[0]
 
     def control_loop(self):
@@ -414,12 +430,12 @@ class FollowWaypoints(smach.State):
             self.q_goal = self.path_waypoints[0]
 
             # Otherwise run potential-field based control
-            obstacles = conversion_script.convert_scan_to_obstacles(self)
+            obstacles = convert_scan_to_obstacles(self)
             self.obstacles = obstacles
 
             # Calculate forces in base_link frame
             q_base = np.array([0.0, 0.0])  # origin in base_link frame
-            q_goal_base = conversion_script.transform_to_base_link(self, self.q_goal)
+            q_goal_base = transform_to_base_link(self, self.q_goal)
 
             attractive_force = self.calculate_attractive_force(q_base, q_goal_base)
             repulsive_force = self.calculate_repulsive_force(q_base, obstacles)
@@ -482,38 +498,24 @@ class FollowWaypoints(smach.State):
             repulsive_force += self.k_r * term1 * term2 * direction
         return repulsive_force
 
-    def check_if_waypoint_in_obstacle(self):
-        """
-        Check if the next waypoint is in an obstacle.
-        Returns True if waypoint is too close to any obstacle, False otherwise.
-        """
-        if (self.path_waypoints is None or len(self.path_waypoints) == 0
-                or self.latest_scan is None):
-            return False
-
-        # Saving next waypoint in the base link frame as well 
-        # to compare it to the obstacle coordinate
-        waypoint = self.path_waypoints[0]
-        waypoint_base = conversion_script.transform_to_base_link(self, waypoint)
-        epsilon = 0.5  # Distance threshold to obstacles in meters
-        obstacles = conversion_script.convert_scan_to_obstacles(self)
-        # Check if waypoint is within epsilon distance of any obstacle
-        for obstacle in obstacles:
-            if np.linalg.norm(waypoint_base - obstacle) < epsilon:
-                return True
-        return False
-
     def execute(self, userdata):
         current_robot_position = self.robot_position
-        if self.path_waypoints is None:
+        if not self.path_waypoints:
             return 'create_waypoints'
         next_waypoint = self.path_waypoints[0]
         epsilon = 0.15
 
+        if self.obstacles is not None and self.path_waypoints is not None:
+            for wp in self.path_waypoints:
+                for obstacle in self.obstacles:
+                    # wp_base_link = transform_to_base_link(self, wp)
+                    wp_grid = convert_world_coordinates_to_grid(wp, START, RESOLUTION)
+                    obstacle_world = transform_to_world(self, obstacle)
+                    obstacle_grid = convert_world_coordinates_to_grid(obstacle_world, START, RESOLUTION)
+                    if wp_grid == obstacle_grid:
+                        print('Obstacle was encountered')
+                        return 'obstacle_encountered'
         twist = Twist()
-        if self.check_if_waypoint_in_obstacle():
-            print('Obstacle was encountered')
-            return 'obstacle_encountered'
         if np.linalg.norm(next_waypoint - current_robot_position) < epsilon:
             del self.path_waypoints[0]
             if len(self.path_waypoints) == 0:
@@ -528,7 +530,9 @@ class FollowWaypoints(smach.State):
 class GoalReached(smach.State):
     """Robot reached goal and turns into given pose."""
 
-    def __init__(self, node, theta_goal=-1.0, theta_goal_threshold=0.1, max_angular_velocity=0.8):
+    def __init__(self, node, theta_goal=0.5*np.pi,  # 0.5*pi -> 90°
+                 theta_goal_threshold=0.01, max_angular_velocity=0.8,
+                 min_angular_velocity=0.3):
         smach.State.__init__(self, outcomes=[
             'turning_to_given_orientation',
             'orientation_reached'
@@ -540,6 +544,7 @@ class GoalReached(smach.State):
         self.theta_goal_threshold = theta_goal_threshold
         self.robot_angle = 0.0
         self.max_angular_velocity = max_angular_velocity
+        self.min_angular_velocity = min_angular_velocity
 
         # Subscriber
         self.odom_sub = self.node.create_subscription(
@@ -576,11 +581,20 @@ class GoalReached(smach.State):
             print('Desired orientation reached.')
             return 'orientation_reached'
         # Rotate to desired orientation
-        twist.angular.z = np.clip(
-            angle_error,
-            -self.max_angular_velocity,
-            self.max_angular_velocity
-        )
+
+        if angle_error > 0:
+            twist.angular.z = np.clip(
+                angle_error,
+                self.min_angular_velocity,
+                self.max_angular_velocity
+            )
+        else:
+            twist.angular.z = np.clip(
+                angle_error,
+                -self.max_angular_velocity,
+                -self.min_angular_velocity
+            )
+
         self.cmd_vel_pub.publish(twist)
         return 'turning_to_given_orientation'
 
