@@ -90,6 +90,10 @@ class GridCell():
             dest, start=START, res=RESOLUTION
         )
 
+        print(f"World grid origin: {START}")
+        print(f"Source world: {src} -> grid: {src_grid}")       
+        print(f"Goal world: {dest} -> grid: {dest_grid}")       
+
         if not self.is_valid(src_grid[0], src_grid[1]) or not self.is_valid(dest_grid[0], dest_grid[1]):
             print("Source or destination is invalid.")
             return
@@ -177,7 +181,7 @@ class CreateWaypoints(smach.State):
     Updating them if robot encountered obstacle.
     """
 
-    def __init__(self, node, q_goal=np.array([3.9, 3.9])):
+    def __init__(self, node, q_goal=np.array([-2, -6])):
         smach.State.__init__(self, outcomes=[
             'create_waypoints',
             'driving_to_goal'
@@ -221,7 +225,10 @@ class CreateWaypoints(smach.State):
 
             # Initialize START from first odometry reading to handle floating-point precision
             if START is None:
-                START = (self.robot_position[0], self.robot_position[1])
+                START = (
+                    self.robot_position[0] - (ROW // 2) * RESOLUTION,
+                    self.robot_position[1] - (COL // 2) * RESOLUTION
+                )
 
             # Extract yaw angle from quaternion
             quat = msg.pose.pose.orientation
@@ -252,7 +259,7 @@ class CreateWaypoints(smach.State):
                     # Also mark neighbour cells as obstructed
                     grid[row][col-1] = 1
                     grid[row][col+1] = 1
-                    grid[row-1][col] = 1
+                    grid[row-1][col] = 11
                     grid[row+1][col] = 1
 
                     grid[row-1][col-1] = 1
@@ -264,11 +271,16 @@ class CreateWaypoints(smach.State):
 
     def execute(self, userdata):
         """Create waypoints or update them after encountering new obstacle."""
+
+        if START is None or self.latest_scan is None:
+            return 'create_waypoints'
+
         gridcell = GridCell()
         current_position = self.robot_position
 
         origin_point = Point()
-        origin_point.x, origin_point.y = current_position
+        origin_point.x = float(START[0])
+        origin_point.y = float(START[1])
         origin_pose = Pose()
         origin_pose.position = origin_point
 
@@ -284,9 +296,6 @@ class CreateWaypoints(smach.State):
         grid_one_dim = [int(i) for i in chain.from_iterable(grid_two_dim)]
         occupancy_grid_msg.data = grid_one_dim
         self.occupancy_grid_msg = occupancy_grid_msg
-
-        if START is None or self.latest_scan is None:
-            return 'create_waypoints'
         
         self.waypoints = gridcell.a_star_search(
             grid=grid_two_dim,
@@ -299,17 +308,27 @@ class CreateWaypoints(smach.State):
 
         self.waypoints = [convert_grid_coordinates_to_world(w, start=START, res=RESOLUTION) for w in self.waypoints]
 
-        waypoint_poses = []
-        for w in self.waypoints:
-            point = Point()
-            point.x, point.y = w
-            pose = Pose()
-            pose.position = point
-            pose_stamped = PoseStamped()
-            pose_stamped.pose = pose
-            waypoint_poses.append(pose_stamped)
 
         path_msg = Path()
+        path_msg.header.frame_id = 'odom'
+        path_msg.header.stamp = self.node.get_clock().now().to_msg()
+
+        waypoint_poses = []
+        for w in self.waypoints:
+            pose_stamped = PoseStamped()
+
+            pose_stamped.header.frame_id = 'odom'
+            pose_stamped.header.stamp = path_msg.header.stamp
+
+            pose_stamped.pose.position.x = float(w[0])
+            pose_stamped.pose.position.y = float(w[1])
+            pose_stamped.pose.position.z = 0.0
+
+            # Valid quaternion
+            pose_stamped.pose.orientation.w = 1.0
+
+            waypoint_poses.append(pose_stamped)
+
         path_msg.poses = waypoint_poses
         self.path.publish(path_msg)
         return 'driving_to_goal'
@@ -369,6 +388,7 @@ class FollowWaypoints(smach.State):
             '/odom',
             self.odom_callback,
             10,
+            
         )
 
         self.path_sub = self.node.create_subscription(
@@ -379,9 +399,28 @@ class FollowWaypoints(smach.State):
         )
 
         # Publisher
+
+        self.trajectory_pub = self.node.create_publisher(
+            Path,
+            '/robot_trajectory',
+            10
+        )
+
+        self.trajectory_msg = Path()
+        self.trajectory_msg.header.frame_id = 'odom'
+
+        self.last_trajectory_position = None
+
+
         self.cmd_vel_pub = self.node.create_publisher(
             Twist,
             '/cmd_vel',
+            10
+        )
+
+        self.local_plan_pub = self.node.create_publisher(
+            Path,
+            '/local_plan',
             10
         )
 
@@ -399,12 +438,46 @@ class FollowWaypoints(smach.State):
 
             # Initialize START from first odometry reading to handle floating-point precision
             if START is None:
-                START = (self.robot_position[0], self.robot_position[1])
+
+                START = (
+                    self.robot_position[0] - (ROW // 2) * RESOLUTION,
+                    self.robot_position[1] - (COL // 2) * RESOLUTION
+                )
 
             # Extract yaw angle from quaternion
             quat = msg.pose.pose.orientation
             _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
             self.robot_angle = yaw
+
+            current_position = np.array([
+            msg.pose.pose.position.x,
+            msg.pose.pose.position.y
+        ])
+
+        # Do not add thousands of almost identical points
+        if (
+            self.last_trajectory_position is None
+            or np.linalg.norm(
+                current_position - self.last_trajectory_position
+            ) > 0.02
+        ):
+            pose_stamped = PoseStamped()
+
+            pose_stamped.header.frame_id = 'odom'
+            pose_stamped.header.stamp = msg.header.stamp
+
+            pose_stamped.pose.position.x = msg.pose.pose.position.x
+            pose_stamped.pose.position.y = msg.pose.pose.position.y
+            pose_stamped.pose.position.z = msg.pose.pose.position.z
+
+            pose_stamped.pose.orientation = msg.pose.pose.orientation
+
+            self.trajectory_msg.header.stamp = msg.header.stamp
+            self.trajectory_msg.poses.append(pose_stamped)
+
+            self.trajectory_pub.publish(self.trajectory_msg)
+
+            self.last_trajectory_position = current_position.copy()
 
     def path_callback(self, msg):
         """Store path poses as two-dimensional waypoint coordinates."""
@@ -420,6 +493,139 @@ class FollowWaypoints(smach.State):
             del self.path_waypoints[0]
             del self.path_waypoints[0]
 
+    def publish_local_plan(self, obstacles, horizon=3.0, dt=0.1):
+        """Predict robot motion for the next few seconds and publish it."""
+
+        if self.q_goal is None:
+            return
+
+        # Simulated robot pose in odom frame
+        x = float(self.robot_position[0])
+        y = float(self.robot_position[1])
+        theta = float(self.robot_angle)
+
+        # Current laser obstacles converted once into odom/world frame
+        obstacles_world = [
+            transform_to_world(self, obstacle)
+            for obstacle in obstacles
+        ]
+
+        path_msg = Path()
+        path_msg.header.frame_id = 'odom'
+        path_msg.header.stamp = self.node.get_clock().now().to_msg()
+
+        steps = int(horizon / dt)
+
+        for _ in range(steps):
+
+            # Add predicted position to RViz path
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            pose.pose.position.z = 0.0
+            pose.pose.orientation.w = 1.0
+
+            path_msg.poses.append(pose)
+
+            # Stop prediction if goal is reached
+            if np.linalg.norm(
+                self.q_goal - np.array([x, y])
+            ) < 0.15:
+                break
+
+            # -------------------------------
+            # Goal -> simulated base_link
+            # -------------------------------
+
+            dx = self.q_goal[0] - x
+            dy = self.q_goal[1] - y
+
+            cos_t = np.cos(theta)
+            sin_t = np.sin(theta)
+
+            q_goal_base = np.array([
+                cos_t * dx + sin_t * dy,
+                -sin_t * dx + cos_t * dy
+            ])
+
+            # -------------------------------
+            # Obstacles -> simulated base_link
+            # -------------------------------
+
+            obstacles_base = []
+
+            for obstacle_world in obstacles_world:
+
+                dx_obs = obstacle_world[0] - x
+                dy_obs = obstacle_world[1] - y
+
+                obstacle_base = np.array([
+                    cos_t * dx_obs + sin_t * dy_obs,
+                    -sin_t * dx_obs + cos_t * dy_obs
+                ])
+
+                obstacles_base.append(obstacle_base)
+
+            # -------------------------------
+            # Same potential-field controller
+            # -------------------------------
+
+            q_base = np.array([0.0, 0.0])
+
+            attractive_force = self.calculate_attractive_force(
+                q_base,
+                q_goal_base
+            )
+
+            repulsive_force = self.calculate_repulsive_force(
+                q_base,
+                obstacles_base
+            )
+
+            total_force = attractive_force + repulsive_force
+
+            force_magnitude = np.linalg.norm(total_force)
+
+            if force_magnitude < 1e-6:
+                break
+
+            force_direction = total_force / force_magnitude
+
+            linear_vel = np.clip(
+                force_magnitude * self.linear_gain,
+                0,
+                self.max_linear_velocity
+            )
+
+            v = force_direction[0] * linear_vel
+
+            angle_to_force = np.arctan2(
+                force_direction[1],
+                force_direction[0]
+            )
+
+            omega = np.clip(
+                angle_to_force,
+                -self.max_angular_velocity,
+                self.max_angular_velocity
+            )
+
+            # -------------------------------
+            # Predict differential-drive motion
+            # -------------------------------
+
+            x += v * np.cos(theta) * dt
+            y += v * np.sin(theta) * dt
+            theta += omega * dt
+
+            theta = np.arctan2(
+                np.sin(theta),
+                np.cos(theta)
+            )
+
+        self.local_plan_pub.publish(path_msg)
+
     def control_loop(self):
         """Compute and publish velocity commands."""
         with self.lock:
@@ -432,6 +638,8 @@ class FollowWaypoints(smach.State):
             # Otherwise run potential-field based control
             obstacles = convert_scan_to_obstacles(self)
             self.obstacles = obstacles
+            
+            self.publish_local_plan(obstacles)
 
             # Calculate forces in base_link frame
             q_base = np.array([0.0, 0.0])  # origin in base_link frame
@@ -497,6 +705,8 @@ class FollowWaypoints(smach.State):
             # Sum produces one resultant direction and magnitude of repulsion
             repulsive_force += self.k_r * term1 * term2 * direction
         return repulsive_force
+
+    
 
     def execute(self, userdata):
         current_robot_position = self.robot_position

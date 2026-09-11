@@ -15,8 +15,8 @@ def convert_world_coordinates_to_grid(coord, start, res):
     if start is None:
         return None, None
 
-    row = int(np.floor((x - start[0]) / res))
-    col = int(np.floor((y - start[1]) / res))
+    row = int(round((x - start[0]) / res))
+    col = int(round((y - start[1]) / res))
     return row, col
 
 
