@@ -90,6 +90,10 @@ class GridCell():
             dest, start=START, res=RESOLUTION
         )
 
+        print(f"World grid origin: {START}")
+        print(f"Source world: {src} -> grid: {src_grid}")       
+        print(f"Goal world: {dest} -> grid: {dest_grid}")       
+
         if not self.is_valid(src_grid[0], src_grid[1]) or not self.is_valid(dest_grid[0], dest_grid[1]):
             print("Source or destination is invalid.")
             return
@@ -177,7 +181,7 @@ class CreateWaypoints(smach.State):
     Updating them if robot encountered obstacle.
     """
 
-    def __init__(self, node, q_goal=np.array([7, 5])):
+    def __init__(self, node, q_goal=np.array([-2, -6])):
         smach.State.__init__(self, outcomes=[
             'create_waypoints',
             'driving_to_goal'
@@ -221,7 +225,10 @@ class CreateWaypoints(smach.State):
 
             # Initialize START from first odometry reading to handle floating-point precision
             if START is None:
-                START = (self.robot_position[0], self.robot_position[1])
+                START = (
+                    self.robot_position[0] - (ROW // 2) * RESOLUTION,
+                    self.robot_position[1] - (COL // 2) * RESOLUTION
+                )
 
             # Extract yaw angle from quaternion
             quat = msg.pose.pose.orientation
@@ -264,11 +271,16 @@ class CreateWaypoints(smach.State):
 
     def execute(self, userdata):
         """Create waypoints or update them after encountering new obstacle."""
+
+        if START is None or self.latest_scan is None:
+            return 'create_waypoints'
+
         gridcell = GridCell()
         current_position = self.robot_position
 
         origin_point = Point()
-        origin_point.x, origin_point.y = current_position
+        origin_point.x = float(START[0])
+        origin_point.y = float(START[1])
         origin_pose = Pose()
         origin_pose.position = origin_point
 
@@ -284,9 +296,6 @@ class CreateWaypoints(smach.State):
         grid_one_dim = [int(i) for i in chain.from_iterable(grid_two_dim)]
         occupancy_grid_msg.data = grid_one_dim
         self.occupancy_grid_msg = occupancy_grid_msg
-
-        if START is None or self.latest_scan is None:
-            return 'create_waypoints'
         
         self.waypoints = gridcell.a_star_search(
             grid=grid_two_dim,
@@ -429,7 +438,11 @@ class FollowWaypoints(smach.State):
 
             # Initialize START from first odometry reading to handle floating-point precision
             if START is None:
-                START = (self.robot_position[0], self.robot_position[1])
+
+                START = (
+                    self.robot_position[0] - (ROW // 2) * RESOLUTION,
+                    self.robot_position[1] - (COL // 2) * RESOLUTION
+                )
 
             # Extract yaw angle from quaternion
             quat = msg.pose.pose.orientation
