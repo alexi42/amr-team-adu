@@ -10,9 +10,13 @@ import numpy as np
 
 def convert_world_coordinates_to_grid(coord, start, res):
     """Convert world coordinates to coordinates in the custom grid."""
-    x, y = coord
+    if start is None or coord is None:
+        return None, None
 
-    if start is None:
+    x = coord[0]
+    y = coord[1]
+
+    if x is None or y is None:
         return None, None
 
     row = int(round((x - start[0]) / res))
@@ -22,14 +26,18 @@ def convert_world_coordinates_to_grid(coord, start, res):
 
 def convert_grid_coordinates_to_world(coord, start, res):
     """Convert grid coordinates back to world coordinates."""
-    x, y = coord
-
-    if start is None:
+    if start is None or coord is None:
         return None, None
 
-    row = x * res + start[0]
-    col = y * res + start[1]
-    return row, col
+    row = coord[0]
+    col = coord[1]
+
+    if row is None or col is None:
+        return None, None
+
+    x = row * res + start[0]
+    y = col * res + start[1]
+    return x, y
 
 
 def convert_scan_to_obstacles(self):
