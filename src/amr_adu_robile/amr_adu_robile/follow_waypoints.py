@@ -187,135 +187,136 @@ class FollowWaypoints(smach.State):
 
     def publish_local_plan(self, obstacles, horizon=3.0, dt=0.1):
         """Predict robot motion for the next few seconds and publish it."""
-        if self.q_goal is None:
-            return
+        with self.lock:
+            if self.q_goal is None:
+                return
 
-        # Simulated robot pose in odom frame
-        x = float(self.robot_position[0])
-        y = float(self.robot_position[1])
-        theta = float(self.robot_angle)
+            # Simulated robot pose in odom frame
+            x = float(self.robot_position[0])
+            y = float(self.robot_position[1])
+            theta = float(self.robot_angle)
 
-        # Current laser obstacles converted once into odom/world frame
-        obstacles_world = [
-            transform_to_world(self, obstacle)
-            for obstacle in obstacles
-        ]
+            # Current laser obstacles converted once into odom/world frame
+            obstacles_world = [
+                transform_to_world(self, obstacle)
+                for obstacle in obstacles
+            ]
 
-        path_msg = Path()
-        path_msg.header.frame_id = 'odom'
-        path_msg.header.stamp = self.node.get_clock().now().to_msg()
+            path_msg = Path()
+            path_msg.header.frame_id = 'odom'
+            path_msg.header.stamp = self.node.get_clock().now().to_msg()
 
-        steps = int(horizon / dt)
+            steps = int(horizon / dt)
 
-        for _ in range(steps):
+            for _ in range(steps):
 
-            # Add predicted position to RViz path
-            pose = PoseStamped()
-            pose.header = path_msg.header
-            pose.pose.position.x = x
-            pose.pose.position.y = y
-            pose.pose.position.z = 0.0
-            pose.pose.orientation.w = 1.0
+                # Add predicted position to RViz path
+                pose = PoseStamped()
+                pose.header = path_msg.header
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.position.z = 0.0
+                pose.pose.orientation.w = 1.0
 
-            path_msg.poses.append(pose)
+                path_msg.poses.append(pose)
 
-            # Stop prediction if goal is reached
-            if np.linalg.norm(
-                self.q_goal - np.array([x, y])
-            ) < 0.15:
-                break
+                # Stop prediction if goal is reached
+                if np.linalg.norm(
+                    self.q_goal - np.array([x, y])
+                ) < 0.15:
+                    break
 
-            # -------------------------------
-            # Goal -> simulated base_link
-            # -------------------------------
+                # -------------------------------
+                # Goal -> simulated base_link
+                # -------------------------------
 
-            dx = self.q_goal[0] - x
-            dy = self.q_goal[1] - y
+                dx = self.q_goal[0] - x
+                dy = self.q_goal[1] - y
 
-            cos_t = np.cos(theta)
-            sin_t = np.sin(theta)
+                cos_t = np.cos(theta)
+                sin_t = np.sin(theta)
 
-            q_goal_base = np.array([
-                cos_t * dx + sin_t * dy,
-                -sin_t * dx + cos_t * dy
-            ])
-
-            # -------------------------------
-            # Obstacles -> simulated base_link
-            # -------------------------------
-
-            obstacles_base = []
-
-            for obstacle_world in obstacles_world:
-
-                dx_obs = obstacle_world[0] - x
-                dy_obs = obstacle_world[1] - y
-
-                obstacle_base = np.array([
-                    cos_t * dx_obs + sin_t * dy_obs,
-                    -sin_t * dx_obs + cos_t * dy_obs
+                q_goal_base = np.array([
+                    cos_t * dx + sin_t * dy,
+                    -sin_t * dx + cos_t * dy
                 ])
 
-                obstacles_base.append(obstacle_base)
+                # -------------------------------
+                # Obstacles -> simulated base_link
+                # -------------------------------
 
-            # -------------------------------
-            # Same potential-field controller
-            # -------------------------------
+                obstacles_base = []
 
-            q_base = np.array([0.0, 0.0])
+                for obstacle_world in obstacles_world:
 
-            attractive_force = self.calculate_attractive_force(
-                q_base,
-                q_goal_base
-            )
+                    dx_obs = obstacle_world[0] - x
+                    dy_obs = obstacle_world[1] - y
 
-            repulsive_force = self.calculate_repulsive_force(
-                q_base,
-                obstacles_base
-            )
+                    obstacle_base = np.array([
+                        cos_t * dx_obs + sin_t * dy_obs,
+                        -sin_t * dx_obs + cos_t * dy_obs
+                    ])
 
-            total_force = attractive_force + repulsive_force
+                    obstacles_base.append(obstacle_base)
 
-            force_magnitude = np.linalg.norm(total_force)
+                # -------------------------------
+                # Same potential-field controller
+                # -------------------------------
 
-            if force_magnitude < 1e-6:
-                break
+                q_base = np.array([0.0, 0.0])
 
-            force_direction = total_force / force_magnitude
+                attractive_force = self.calculate_attractive_force(
+                    q_base,
+                    q_goal_base
+                )
 
-            linear_vel = np.clip(
-                force_magnitude * self.linear_gain,
-                0,
-                self.max_linear_velocity
-            )
+                repulsive_force = self.calculate_repulsive_force(
+                    q_base,
+                    obstacles_base
+                )
 
-            v = force_direction[0] * linear_vel
+                total_force = attractive_force + repulsive_force
 
-            angle_to_force = np.arctan2(
-                force_direction[1],
-                force_direction[0]
-            )
+                force_magnitude = np.linalg.norm(total_force)
 
-            omega = np.clip(
-                angle_to_force,
-                -self.max_angular_velocity,
-                self.max_angular_velocity
-            )
+                if force_magnitude < 1e-6:
+                    break
 
-            # -------------------------------
-            # Predict differential-drive motion
-            # -------------------------------
+                force_direction = total_force / force_magnitude
 
-            x += v * np.cos(theta) * dt
-            y += v * np.sin(theta) * dt
-            theta += omega * dt
+                linear_vel = np.clip(
+                    force_magnitude * self.linear_gain,
+                    0,
+                    self.max_linear_velocity
+                )
 
-            theta = np.arctan2(
-                np.sin(theta),
-                np.cos(theta)
-            )
+                v = force_direction[0] * linear_vel
 
-        self.local_plan_pub.publish(path_msg)
+                angle_to_force = np.arctan2(
+                    force_direction[1],
+                    force_direction[0]
+                )
+
+                omega = np.clip(
+                    angle_to_force,
+                    -self.max_angular_velocity,
+                    self.max_angular_velocity
+                )
+
+                # -------------------------------
+                # Predict differential-drive motion
+                # -------------------------------
+
+                x += v * np.cos(theta) * dt
+                y += v * np.sin(theta) * dt
+                theta += omega * dt
+
+                theta = np.arctan2(
+                    np.sin(theta),
+                    np.cos(theta)
+                )
+
+            self.local_plan_pub.publish(path_msg)
 
     def control_loop(self):
         """Compute and publish velocity commands."""
@@ -363,12 +364,13 @@ class FollowWaypoints(smach.State):
         q_goal: goal position (x, y) in the same frame as q
         Returns: attractive force
         """
-        eps = 1e-6
-        direction = q_goal - q
-        distance = np.linalg.norm(direction)
-        if distance < eps:
-            return np.array([0.0, 0.0])
-        return self.k_a * direction / distance
+        with self.lock:
+            eps = 1e-6
+            direction = q_goal - q
+            distance = np.linalg.norm(direction)
+            if distance < eps:
+                return np.array([0.0, 0.0])
+            return self.k_a * direction / distance
 
     def calculate_repulsive_force(self, q, obstacles):
         """
@@ -378,54 +380,56 @@ class FollowWaypoints(smach.State):
         obstacles: list of obstacle positions in base_link
         Returns: repulsive force
         """
-        repulsive_force = np.array([0.0, 0.0])
+        with self.lock:
+            repulsive_force = np.array([0.0, 0.0])
 
-        eps = 1e-6
-        for obstacle_pos in obstacles:
-            diff = q - obstacle_pos
-            distance = np.linalg.norm(diff)
+            eps = 1e-6
+            for obstacle_pos in obstacles:
+                diff = q - obstacle_pos
+                distance = np.linalg.norm(diff)
 
-            # ignore obstacles outside influence radius or too-close values
-            if distance >= self.rho_0 or distance < eps:
-                continue
+                # ignore obstacles outside influence radius or too-close values
+                if distance >= self.rho_0 or distance < eps:
+                    continue
 
-            term1 = 1.0 / distance - 1.0 / self.rho_0
-            term2 = 1.0 / (distance ** 2)
-            direction = diff / distance
+                term1 = 1.0 / distance - 1.0 / self.rho_0
+                term2 = 1.0 / (distance ** 2)
+                direction = diff / distance
 
-            # Sum produces one resultant direction and magnitude of repulsion
-            repulsive_force += self.k_r * term1 * term2 * direction
-        return repulsive_force
+                # Sum produces one resultant direction and magnitude of repulsion
+                repulsive_force += self.k_r * term1 * term2 * direction
+            return repulsive_force
 
     def execute(self, userdata):
-        current_robot_position = self.robot_position
-        if not self.path_waypoints:
-            return 'create_waypoints'
-        next_waypoint = self.path_waypoints[0]
-        epsilon = 0.15
+        with self.lock:
+            current_robot_position = self.robot_position
+            if not self.path_waypoints:
+                return 'create_waypoints'
+            next_waypoint = self.path_waypoints[0]
+            epsilon = 0.15
 
-        if self.obstacles is not None and self.path_waypoints is not None:
-            for wp in self.path_waypoints:
-                for obstacle in self.obstacles:
-                    # wp_base_link = transform_to_base_link(self, wp)
-                    wp_grid = convert_world_coordinates_to_grid(wp, self.node.START, self.RESOLUTION)
-                    obstacle_world = transform_to_world(self, obstacle)
-                    obstacle_grid = convert_world_coordinates_to_grid(obstacle_world, self.node.START, self.RESOLUTION)
-                    if wp_grid != (None, None) and obstacle_grid != (None, None) and wp_grid == obstacle_grid:
-                        print('Obstacle was encountered')
-                        return 'obstacle_encountered'
-        twist = Twist()
-        if np.linalg.norm(next_waypoint - current_robot_position) < epsilon:
-            print("Driving to next waypoint")
-            if self.path_waypoints:
-                print("Delete closest waypoint")
-                del self.path_waypoints[0]
-            if len(self.path_waypoints) == 0:
-                print("Waypoints are empty")
-                twist.linear.x = 0.0
-                twist.linear.y = 0.0
-                self.cmd_vel_pub.publish(twist)
-                print('Goal reached. Stopping robot.')
-                return 'goal_reached'
-        self.control_loop()
-        return 'driving_to_goal'
+            if self.obstacles is not None and self.path_waypoints is not None:
+                for wp in self.path_waypoints:
+                    for obstacle in self.obstacles:
+                        # wp_base_link = transform_to_base_link(self, wp)
+                        wp_grid = convert_world_coordinates_to_grid(wp, self.node.START, self.RESOLUTION)
+                        obstacle_world = transform_to_world(self, obstacle)
+                        obstacle_grid = convert_world_coordinates_to_grid(obstacle_world, self.node.START, self.RESOLUTION)
+                        if wp_grid != (None, None) and obstacle_grid != (None, None) and wp_grid == obstacle_grid:
+                            print('Obstacle was encountered')
+                            return 'obstacle_encountered'
+            twist = Twist()
+            if np.linalg.norm(next_waypoint - current_robot_position) < epsilon:
+                print("Driving to next waypoint")
+                if self.path_waypoints:
+                    print("Delete closest waypoint")
+                    del self.path_waypoints[0]
+                if len(self.path_waypoints) == 0:
+                    print("Waypoints are empty")
+                    twist.linear.x = 0.0
+                    twist.linear.y = 0.0
+                    self.cmd_vel_pub.publish(twist)
+                    print('Goal reached. Stopping robot.')
+                    return 'goal_reached'
+            self.control_loop()
+            return 'driving_to_goal'

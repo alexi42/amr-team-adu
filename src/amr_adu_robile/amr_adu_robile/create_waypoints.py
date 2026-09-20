@@ -118,73 +118,73 @@ class CreateWaypoints(smach.State):
 
     def execute(self, userdata):
         """Create waypoints or update them after encountering new obstacle."""
+        with self.lock:
+            if self.node.START is None or self.latest_scan is None:
+                return 'create_waypoints'
 
-        if self.node.START is None or self.latest_scan is None:
-            return 'create_waypoints'
+            gridcell = GridCell()
+            current_position = self.robot_position
 
-        gridcell = GridCell()
-        current_position = self.robot_position
+            origin_point = Point()
+            origin_point.x = float(self.node.START[0])
+            origin_point.y = float(self.node.START[1])
+            origin_pose = Pose()
+            origin_pose.position = origin_point
 
-        origin_point = Point()
-        origin_point.x = float(self.node.START[0])
-        origin_point.y = float(self.node.START[1])
-        origin_pose = Pose()
-        origin_pose.position = origin_point
+            map_meta_data_msg = MapMetaData()
+            map_meta_data_msg.resolution = self.RESOLUTION
+            map_meta_data_msg.width = self.ROW
+            map_meta_data_msg.height = self.COL
+            map_meta_data_msg.origin = origin_pose
 
-        map_meta_data_msg = MapMetaData()
-        map_meta_data_msg.resolution = self.RESOLUTION
-        map_meta_data_msg.width = self.ROW
-        map_meta_data_msg.height = self.COL
-        map_meta_data_msg.origin = origin_pose
+            occupancy_grid_msg = OccupancyGrid()
+            occupancy_grid_msg.info = map_meta_data_msg
+            grid_two_dim = self.write_obstacles_into_grid()
+            grid_one_dim = [int(i) for i in chain.from_iterable(grid_two_dim)]
+            occupancy_grid_msg.data = grid_one_dim
+            self.occupancy_grid.publish(occupancy_grid_msg)
 
-        occupancy_grid_msg = OccupancyGrid()
-        occupancy_grid_msg.info = map_meta_data_msg
-        grid_two_dim = self.write_obstacles_into_grid()
-        grid_one_dim = [int(i) for i in chain.from_iterable(grid_two_dim)]
-        occupancy_grid_msg.data = grid_one_dim
-        self.occupancy_grid.publish(occupancy_grid_msg)
+            if np.any(grid_two_dim) or np.any(current_position) or self.q_goal is not None:
+                self.waypoints = gridcell.a_star_search(
+                    grid=grid_two_dim,
+                    src=current_position,
+                    dest=self.q_goal,
+                    start=self.node.START
+                )
 
-        if np.any(grid_two_dim) or np.any(current_position) or self.q_goal is not None:
-            self.waypoints = gridcell.a_star_search(
-                grid=grid_two_dim,
-                src=current_position,
-                dest=self.q_goal,
-                start=self.node.START
-            )
+            if self.waypoints is None:
+                return 'create_waypoints'
 
-        if self.waypoints is None:
-            return 'create_waypoints'
+            waypoints_world = [
+                convert_grid_coordinates_to_world(w, start=self.node.START, res=self.RESOLUTION)
+                for w in self.waypoints
+            ]
 
-        waypoints_world = [
-            convert_grid_coordinates_to_world(w, start=self.node.START, res=self.RESOLUTION)
-            for w in self.waypoints
-        ]
+            self.waypoints = [
+                transform_to_base_link(self, w)
+                for w in waypoints_world
+            ]
 
-        self.waypoints = [
-            transform_to_base_link(self, w)
-            for w in waypoints_world
-        ]
+            path_msg = Path()
+            path_msg.header.frame_id = 'odom'
+            path_msg.header.stamp = self.node.get_clock().now().to_msg()
 
-        path_msg = Path()
-        path_msg.header.frame_id = 'odom'
-        path_msg.header.stamp = self.node.get_clock().now().to_msg()
+            waypoint_poses = []
+            for w in self.waypoints:
+                pose_stamped = PoseStamped()
 
-        waypoint_poses = []
-        for w in self.waypoints:
-            pose_stamped = PoseStamped()
+                pose_stamped.header.frame_id = 'odom'
+                pose_stamped.header.stamp = path_msg.header.stamp
 
-            pose_stamped.header.frame_id = 'odom'
-            pose_stamped.header.stamp = path_msg.header.stamp
+                pose_stamped.pose.position.x = float(w[0])
+                pose_stamped.pose.position.y = float(w[1])
+                pose_stamped.pose.position.z = 0.0
 
-            pose_stamped.pose.position.x = float(w[0])
-            pose_stamped.pose.position.y = float(w[1])
-            pose_stamped.pose.position.z = 0.0
+                # Valid quaternion
+                pose_stamped.pose.orientation.w = 1.0
 
-            # Valid quaternion
-            pose_stamped.pose.orientation.w = 1.0
+                waypoint_poses.append(pose_stamped)
 
-            waypoint_poses.append(pose_stamped)
-
-        path_msg.poses = waypoint_poses
-        self.path.publish(path_msg)
-        return 'driving_to_goal'
+            path_msg.poses = waypoint_poses
+            self.path.publish(path_msg)
+            return 'driving_to_goal'
