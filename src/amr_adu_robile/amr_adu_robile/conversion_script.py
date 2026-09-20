@@ -40,17 +40,16 @@ def convert_grid_coordinates_to_world(coord, start, res):
     return x, y
 
 
-def convert_scan_to_obstacles(self):
+def convert_scan_to_obstacles(scan):
     """
     Convert laser scan data to obstacle positions in base_link frame.
 
     Returns list of obstacle positions as (x, y) in base_link coordinates.
     """
     obstacles = []
-    scan = self.latest_scan
     for i, range_val in enumerate(scan.ranges):
         # Skip invalid readings
-        if range_val < scan.range_min or range_val > scan.range_max:
+        if range_val < scan.range_min or range_val > scan.range_max or np.isnan(range_val):
             continue
 
         # Calculate angle
