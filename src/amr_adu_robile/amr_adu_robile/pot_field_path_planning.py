@@ -182,7 +182,7 @@ class CreateWaypoints(smach.State):
     Updating them if robot encountered obstacle.
     """
 
-    def __init__(self, node, q_goal=np.array([4.0, 6.0])):
+    def __init__(self, node, q_goal=np.array([3.0, 1.5])):
         smach.State.__init__(self, outcomes=[
             'create_waypoints',
             'driving_to_goal'
@@ -190,10 +190,10 @@ class CreateWaypoints(smach.State):
         self.node = node
         self.q_goal = q_goal
         self.lock = threading.Lock()
-        self.robot_position = np.array([-2.0, -3.5])
+        self.robot_position = np.array([0.0, 0.0])
         self.waypoints = None
         self.latest_scan = None
-        self.occupancy_grid_msg = None
+        self.occupancy_grid = None
 
         # Subscriber to get robots current position
         self.odom_sub = self.node.create_subscription(
@@ -214,6 +214,14 @@ class CreateWaypoints(smach.State):
         self.path = self.node.create_publisher(
             Path,
             '/path',
+            10
+        )
+
+        # Publisher for occupancy grid
+
+        self.occupancy_grid = self.node.create_publisher(
+            OccupancyGrid,
+            '/map',
             10
         )
 
@@ -242,29 +250,31 @@ class CreateWaypoints(smach.State):
 
     def write_obstacles_into_grid(self):
         grid = np.zeros((ROW, COL), dtype=np.uint8)
-        if self.latest_scan is not None:
-            for obstacle_base in convert_scan_to_obstacles(self):
+        with self.lock:
+            if self.latest_scan is not None:
+                obstacles_base = convert_scan_to_obstacles(self.latest_scan)
+                for obstacle_base in obstacles_base:
 
-                obstacle_world = transform_to_world(self, obstacle_base)
+                    obstacle_world = transform_to_world(self, obstacle_base)
 
-                row, col = convert_world_coordinates_to_grid(
-                    obstacle_world,
-                    self.node.START,
-                    RESOLUTION
-                )
+                    row, col = convert_world_coordinates_to_grid(
+                        obstacle_world,
+                        self.node.START,
+                        RESOLUTION
+                    )
 
-                if 0 <= row < ROW and 0 <= col < COL:
-                    grid[row][col] = 1
+                    if 0 <= row < ROW and 0 <= col < COL:
+                        grid[row][col] = 1
 
-                    # Also mark neighbour cells as obstructed, staying inside the grid.
-                    for d_row in (-1, 0, 1):
-                        for d_col in (-1, 0, 1):
-                            inflated_row = row + d_row
-                            inflated_col = col + d_col
-                            if 0 <= inflated_row < ROW and 0 <= inflated_col < COL:
-                                grid[inflated_row][inflated_col] = 1
+                        # Also mark neighbour cells as obstructed, staying inside the grid.
+                        for d_row in (-1, 0, 1):
+                            for d_col in (-1, 0, 1):
+                                inflated_row = row + d_row
+                                inflated_col = col + d_col
+                                if 0 <= inflated_row < ROW and 0 <= inflated_col < COL:
+                                    grid[inflated_row][inflated_col] = 1
 
-        return grid
+            return grid
 
     def execute(self, userdata):
         """Create waypoints or update them after encountering new obstacle."""
@@ -292,7 +302,7 @@ class CreateWaypoints(smach.State):
         grid_two_dim = self.write_obstacles_into_grid()
         grid_one_dim = [int(i) for i in chain.from_iterable(grid_two_dim)]
         occupancy_grid_msg.data = grid_one_dim
-        self.occupancy_grid_msg = occupancy_grid_msg
+        self.occupancy_grid.publish(occupancy_grid_msg)
 
         if np.any(grid_two_dim) or np.any(current_position) or self.q_goal is not None:
             self.waypoints = gridcell.a_star_search(
@@ -305,11 +315,15 @@ class CreateWaypoints(smach.State):
         if self.waypoints is None:
             return 'create_waypoints'
 
-        self.waypoints = [
+        waypoints_world = [
             convert_grid_coordinates_to_world(w, start=self.node.START, res=RESOLUTION)
             for w in self.waypoints
         ]
 
+        self.waypoints = [
+            transform_to_base_link(self, w)
+            for w in waypoints_world
+        ]
 
         path_msg = Path()
         path_msg.header.frame_id = 'odom'
@@ -340,8 +354,8 @@ class FollowWaypoints(smach.State):
     """
     State to follow waypoints.
     """
-    def __init__(self, node, k_a=1.0, k_r=0.5, rho_0=0.5,
-                 max_linear_velocity=0.5, max_angular_velocity=0.8):
+    def __init__(self, node, k_a=0.6, k_r=0.5, rho_0=0.4,
+                 max_linear_velocity=0.8, max_angular_velocity=0.5):
         smach.State.__init__(self, outcomes=[
             'driving_to_goal',
             'obstacle_encountered',
@@ -364,7 +378,7 @@ class FollowWaypoints(smach.State):
         self.linear_gain = 0.8  # scale factor from force magnitude to linear velocity
 
         # Robot state
-        self.robot_position = np.array([0.3, -3.5])
+        self.robot_position = np.array([0.0, 0.0])
         self.robot_angle = 0.0
         self.latest_scan = None
         self.path_waypoints = None
@@ -390,13 +404,19 @@ class FollowWaypoints(smach.State):
             '/odom',
             self.odom_callback,
             10,
-            
         )
 
         self.path_sub = self.node.create_subscription(
             Path,
             '/path',
             self.path_callback,
+            10
+        )
+
+        self.occupancy_grid_sub = self.node.create_subscription(
+            OccupancyGrid,
+            '/map',
+            self.occupancy_grid_callback,
             10
         )
 
@@ -495,6 +515,10 @@ class FollowWaypoints(smach.State):
                 if np.linalg.norm(self.path_waypoints[0] - self.robot_position) > 0.15:
                     break
                 del self.path_waypoints[0]
+
+    def occupancy_grid_callback(self, msg):
+        with self.lock:
+            self.occupancy_grid_sub = msg
 
     def publish_local_plan(self, obstacles, horizon=3.0, dt=0.1):
         """Predict robot motion for the next few seconds and publish it."""
@@ -638,17 +662,16 @@ class FollowWaypoints(smach.State):
             self.q_goal = self.path_waypoints[0]
 
             # Otherwise run potential-field based control
-            obstacles = convert_scan_to_obstacles(self)
-            self.obstacles = obstacles
+            self.obstacles = convert_scan_to_obstacles(self.latest_scan)
 
-            self.publish_local_plan(obstacles)
+            self.publish_local_plan(self.obstacles)
 
             # Calculate forces in base_link frame
             q_base = np.array([0.0, 0.0])  # origin in base_link frame
             q_goal_base = transform_to_base_link(self, self.q_goal)
 
             attractive_force = self.calculate_attractive_force(q_base, q_goal_base)
-            repulsive_force = self.calculate_repulsive_force(q_base, obstacles)
+            repulsive_force = self.calculate_repulsive_force(q_base, self.obstacles)
 
             total_force = attractive_force + repulsive_force
             force_magnitude = np.linalg.norm(total_force)
@@ -659,6 +682,7 @@ class FollowWaypoints(smach.State):
                 linear_vel = np.clip(force_magnitude * self.linear_gain, 0,
                                      self.max_linear_velocity)
                 twist.linear.x = force_direction[0] * linear_vel
+                twist.linear.y = force_direction[1] * linear_vel / 3
                 angle_to_force = np.arctan2(force_direction[1], force_direction[0])
                 twist.angular.z = np.clip(angle_to_force,
                                           -self.max_angular_velocity,
@@ -734,6 +758,7 @@ class FollowWaypoints(smach.State):
             if len(self.path_waypoints) == 0:
                 print("Waypoints are empty")
                 twist.linear.x = 0.0
+                twist.linear.y = 0.0
                 self.cmd_vel_pub.publish(twist)
                 print('Goal reached. Stopping robot.')
                 return 'goal_reached'
