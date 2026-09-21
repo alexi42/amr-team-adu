@@ -18,7 +18,7 @@ class GoalReached(smach.State):
             'orientation_reached'
         ])
         self.node = node
-        self.lock = threading.Lock()
+        self.rlock = threading.RLock()
         self.cmd_vel_pub = self.node.create_publisher(Twist, 'cmd_vel', 10)
         self.theta_goal = theta_goal
         self.theta_goal_threshold = theta_goal_threshold
@@ -43,15 +43,13 @@ class GoalReached(smach.State):
 
     def odom_callback(self, msg):
         """Update robot pose from odometry."""
-        with self.lock:
-
-            # Extract yaw angle from quaternion
-            quat = msg.pose.pose.orientation
-            _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
-            self.robot_angle = yaw
+        # Extract yaw angle from quaternion
+        quat = msg.pose.pose.orientation
+        _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
+        self.robot_angle = yaw
 
     def execute(self, userdata):
-        with self.lock:
+        with self.rlock:
             angle_error = self.calculate_angle_error(self.theta_goal)
             twist = Twist()
 
@@ -81,8 +79,7 @@ class GoalReached(smach.State):
 
     def calculate_angle_error(self, target_angle):
         """Calculate the smallest angle error between robot orientation and target angle."""
-        with self.lock:
-            angle_error = target_angle - self.robot_angle
-            # Normalize to [-pi, pi]
-            angle_error = np.arctan2(np.sin(angle_error), np.cos(angle_error))
-            return angle_error
+        angle_error = target_angle - self.robot_angle
+        # Normalize to [-pi, pi]
+        angle_error = np.arctan2(np.sin(angle_error), np.cos(angle_error))
+        return angle_error

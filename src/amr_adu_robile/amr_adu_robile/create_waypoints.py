@@ -25,7 +25,7 @@ class CreateWaypoints(smach.State):
         ])
         self.node = node
         self.q_goal = q_goal
-        self.lock = threading.Lock()
+        self.rlock = threading.RLock()
         self.robot_position = np.array([0.0, 0.0])
         self.waypoints = None
         self.latest_scan = None
@@ -68,61 +68,58 @@ class CreateWaypoints(smach.State):
 
     def odom_callback(self, msg):
         """Update robot pose from odometry."""
-        with self.lock:
-            self.robot_position[0] = msg.pose.pose.position.x
-            self.robot_position[1] = msg.pose.pose.position.y
+        self.robot_position[0] = msg.pose.pose.position.x
+        self.robot_position[1] = msg.pose.pose.position.y
 
-            # Initialize START from first odometry reading to handle floating-point precision
-            if self.node.START is None:
-                self.node.START = (
-                    self.robot_position[0] - (self.ROW // 2) * self.RESOLUTION,
-                    self.robot_position[1] - (self.COL // 2) * self.RESOLUTION,
-                )
+        # Initialize START from first odometry reading to handle floating-point precision
+        if self.node.START is None:
+            self.node.START = (
+                self.robot_position[0] - (self.ROW // 2) * self.RESOLUTION,
+                self.robot_position[1] - (self.COL // 2) * self.RESOLUTION,
+            )
 
-            # Extract yaw angle from quaternion
-            quat = msg.pose.pose.orientation
-            _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
-            self.robot_angle = yaw
+        # Extract yaw angle from quaternion
+        quat = msg.pose.pose.orientation
+        _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
+        self.robot_angle = yaw
 
     def scan_callback(self, msg):
         """Store latest laser scan data."""
-        with self.lock:
-            self.latest_scan = msg
+        self.latest_scan = msg
 
     def write_obstacles_into_grid(self):
         grid = np.zeros((self.ROW, self.COL), dtype=np.uint8)
-        with self.lock:
-            if self.latest_scan is not None:
-                obstacles_base = convert_scan_to_obstacles(self.latest_scan)
-                for obstacle_base in obstacles_base:
+        if self.latest_scan is not None:
+            obstacles_base = convert_scan_to_obstacles(self.latest_scan)
+            for obstacle_base in obstacles_base:
 
-                    obstacle_world = transform_to_world(self, obstacle_base)
+                obstacle_world = transform_to_world(self, obstacle_base)
 
-                    row, col = convert_world_coordinates_to_grid(
-                        obstacle_world,
-                        self.node.START,
-                        self.RESOLUTION
-                    )
+                row, col = convert_world_coordinates_to_grid(
+                    obstacle_world,
+                    self.node.START,
+                    self.RESOLUTION
+                )
 
-                    if 0 <= row < self.ROW and 0 <= col < self.COL:
-                        grid[row][col] = 1
+                if 0 <= row < self.ROW and 0 <= col < self.COL:
+                    grid[row][col] = 1
 
-                        # Also mark neighbour cells as obstructed, staying inside the grid.
-                        for d_row in (-1, 0, 1):
-                            for d_col in (-1, 0, 1):
-                                inflated_row = row + d_row
-                                inflated_col = col + d_col
-                                if 0 <= inflated_row < self.ROW and 0 <= inflated_col < self.COL:
-                                    grid[inflated_row][inflated_col] = 1
-            return grid
+                    # Also mark neighbour cells as obstructed, staying inside the grid.
+                    for d_row in (-1, 0, 1):
+                        for d_col in (-1, 0, 1):
+                            inflated_row = row + d_row
+                            inflated_col = col + d_col
+                            if 0 <= inflated_row < self.ROW and 0 <= inflated_col < self.COL:
+                                grid[inflated_row][inflated_col] = 1
+        return grid
 
     def execute(self, userdata):
         """Create waypoints or update them after encountering new obstacle."""
-        with self.lock:
+        with self.rlock:
             if self.node.START is None or self.latest_scan is None:
                 return 'create_waypoints'
 
-            gridcell = GridCell()
+            gridcell = GridCell(ROW=self.ROW, COL=self.COL, RESOLUTION=self.RESOLUTION)
             current_position = self.robot_position
 
             origin_point = Point()
