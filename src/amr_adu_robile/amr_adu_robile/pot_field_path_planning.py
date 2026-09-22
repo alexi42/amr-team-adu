@@ -4,6 +4,7 @@ import threading
 from .create_waypoints import CreateWaypoints
 from .follow_waypoints import FollowWaypoints
 from .goal_reached import GoalReached
+from .goal_unreachable import GoalUnreachable
 
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
@@ -25,36 +26,45 @@ def main(args=None):
     node.dest_lock = threading.Lock()
 
     # Create state machine
-    sm = smach.StateMachine(outcomes=['orientation_reached', 'error'])
+    sm = smach.StateMachine(outcomes=['orientation_reached', 'goal_unreachable'])
 
     # Add states to state machine
     with sm:
         smach.StateMachine.add(
-            'CREATE WAYPOINTS',
+            'CREATE_WAYPOINTS',
             CreateWaypoints(node, ROW=ROW, COL=COL, RESOLUTION=RESOLUTION),
             transitions={
-                'create_waypoints': 'CREATE WAYPOINTS',
-                'driving_to_goal': 'FOLLOW WAYPOINTS'
+                'create_waypoints': 'CREATE_WAYPOINTS',
+                'driving_to_goal': 'FOLLOW_WAYPOINTS'
             }
         )
 
         smach.StateMachine.add(
-            'FOLLOW WAYPOINTS',
+            'FOLLOW_WAYPOINTS',
             FollowWaypoints(node, ROW=ROW, COL=COL, RESOLUTION=RESOLUTION),
             transitions={
-                'driving_to_goal': 'FOLLOW WAYPOINTS',
-                'obstacle_encountered': 'CREATE WAYPOINTS',
-                'goal_reached': 'GOAL REACHED',
-                'create_waypoints': 'CREATE WAYPOINTS'
+                'driving_to_goal': 'FOLLOW_WAYPOINTS',
+                'obstacle_encountered': 'CREATE_WAYPOINTS',
+                'goal_reached': 'GOAL_REACHED',
+                'create_waypoints': 'CREATE_WAYPOINTS',
+                'goal_unreachable': 'GOAL_UNREACHABLE'
             }
         )
 
         smach.StateMachine.add(
-            'GOAL REACHED',
+            'GOAL_REACHED',
             GoalReached(node),
             transitions={
-                'turning_to_given_orientation': 'GOAL REACHED',
+                'turning_to_given_orientation': 'GOAL_REACHED',
                 'orientation_reached': 'orientation_reached'
+            }
+        )
+
+        smach.StateMachine.add(
+            'GOAL_UNREACHABLE',
+            GoalUnreachable(node),
+            transitions={
+                'goal_unreachable': 'goal_unreachable'
             }
         )
 

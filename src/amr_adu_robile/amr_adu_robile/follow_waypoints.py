@@ -21,7 +21,8 @@ class FollowWaypoints(smach.State):
             'driving_to_goal',
             'obstacle_encountered',
             'goal_reached',
-            'create_waypoints'
+            'create_waypoints',
+            'goal_unreachable'
         ])
         self.node = node
 
@@ -386,6 +387,11 @@ class FollowWaypoints(smach.State):
                 return 'create_waypoints'
             next_waypoint = self.path_waypoints[0]
             epsilon = 0.05
+            twist = Twist()
+
+            dest_grid = convert_world_coordinates_to_grid(
+                np.array(self.node.DESTINATION), self.node.START, self.RESOLUTION
+            )
 
             if self.obstacles is not None and self.path_waypoints is not None:
                 for wp in self.path_waypoints:
@@ -394,9 +400,18 @@ class FollowWaypoints(smach.State):
                         obstacle_world = transform_to_world(self, obstacle)
                         obstacle_grid = convert_world_coordinates_to_grid(obstacle_world, self.node.START, self.RESOLUTION)
                         if wp_grid != (None, None) and obstacle_grid != (None, None) and wp_grid == obstacle_grid:
+                            # Check if goal is reachable
+                            if dest_grid != (None, None) and dest_grid == obstacle_grid:
+                                print("There is an obstacle at the destination.")
+                                return 'goal_unreachable'
+                            # Stop robot until new waypoints were created
+                            twist.linear.x = 0.0
+                            twist.linear.y = 0.0
+                            twist.angular.z = 0.0
+                            self.cmd_vel_pub.publish(twist)
                             print('Obstacle was encountered')
                             return 'obstacle_encountered'
-            twist = Twist()
+
             if np.linalg.norm(next_waypoint - current_robot_position) < epsilon:
                 print("Driving to next waypoint")
                 if self.path_waypoints:
@@ -409,9 +424,6 @@ class FollowWaypoints(smach.State):
                     # Comparing grid cells to avoid floating errors
                     robot_grid = convert_world_coordinates_to_grid(
                         current_robot_position, self.node.START, self.RESOLUTION
-                    )
-                    dest_grid = convert_world_coordinates_to_grid(
-                        np.array(self.node.DESTINATION), self.node.START, self.RESOLUTION
                     )
 
                     if robot_grid != (None, None) and dest_grid != (None, None) and robot_grid == dest_grid:
