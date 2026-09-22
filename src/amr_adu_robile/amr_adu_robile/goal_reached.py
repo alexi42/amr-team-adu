@@ -57,7 +57,7 @@ class GoalReached(smach.State):
                 # Stop when both position and orientation reached
                 twist.angular.z = 0.0
                 self.cmd_vel_pub.publish(twist)
-                print('Desired orientation reached.')
+                print("Desired orientation reached.")
                 return 'orientation_reached'
             # Rotate to desired orientation
 

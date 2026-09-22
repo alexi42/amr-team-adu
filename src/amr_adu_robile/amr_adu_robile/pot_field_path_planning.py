@@ -21,8 +21,8 @@ def main(args=None):
     node = rclpy.create_node('state_machine')
     node.START = None
     node.start_lock = threading.Lock()
-
-    # Define thresholds
+    node.DESTINATION = None
+    node.dest_lock = threading.Lock()
 
     # Create state machine
     sm = smach.StateMachine(outcomes=['orientation_reached', 'error'])

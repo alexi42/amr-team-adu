@@ -15,7 +15,7 @@ class FollowWaypoints(smach.State):
     State to follow waypoints.
     """
     def __init__(self, node, ROW, COL, RESOLUTION,
-                 k_a=0.6, k_r=0.5, rho_0=0.4,
+                 k_a=0.6, k_r=0.4, rho_0=0.4,
                  max_linear_velocity=0.8, max_angular_velocity=0.5):
         smach.State.__init__(self, outcomes=[
             'driving_to_goal',
@@ -120,14 +120,6 @@ class FollowWaypoints(smach.State):
         self.robot_position[0] = msg.pose.pose.position.x
         self.robot_position[1] = msg.pose.pose.position.y
 
-        # Initialize START from first odometry reading to handle floating-point precision
-        if self.node.START is None:
-
-            self.node.START = (
-                self.robot_position[0] - (self.ROW // 2) * self.RESOLUTION,
-                self.robot_position[1] - (self.COL // 2) * self.RESOLUTION
-            )
-
         # Extract yaw angle from quaternion
         quat = msg.pose.pose.orientation
         _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
@@ -172,11 +164,6 @@ class FollowWaypoints(smach.State):
             ])
             for pose in msg.poses
         ]
-        # Drop the first waypoints only when they exist and the path is long enough.
-        while len(self.path_waypoints) > 2:
-            if np.linalg.norm(self.path_waypoints[0] - self.robot_position) > 0.15:
-                break
-            del self.path_waypoints[0]
 
     def occupancy_grid_callback(self, msg):
         self.occupancy_grid_sub = msg
@@ -396,15 +383,13 @@ class FollowWaypoints(smach.State):
         with self.rlock:
             current_robot_position = self.robot_position
             if not self.path_waypoints:
-                print("waypoints empty")
                 return 'create_waypoints'
             next_waypoint = self.path_waypoints[0]
-            epsilon = 0.15
+            epsilon = 0.05
 
             if self.obstacles is not None and self.path_waypoints is not None:
                 for wp in self.path_waypoints:
                     for obstacle in self.obstacles:
-                        # wp_base_link = transform_to_base_link(self, wp)
                         wp_grid = convert_world_coordinates_to_grid(wp, self.node.START, self.RESOLUTION)
                         obstacle_world = transform_to_world(self, obstacle)
                         obstacle_grid = convert_world_coordinates_to_grid(obstacle_world, self.node.START, self.RESOLUTION)
@@ -418,11 +403,35 @@ class FollowWaypoints(smach.State):
                     print("Delete closest waypoint")
                     del self.path_waypoints[0]
                 if len(self.path_waypoints) == 0:
-                    print("Waypoints are empty")
-                    twist.linear.x = 0.0
-                    twist.linear.y = 0.0
-                    self.cmd_vel_pub.publish(twist)
-                    print('Goal reached. Stopping robot.')
-                    return 'goal_reached'
+                    if current_robot_position is None or self.node.DESTINATION is None:
+                        return 'create_waypoints'
+
+                    # Comparing grid cells to avoid floating errors
+                    robot_grid = convert_world_coordinates_to_grid(
+                        current_robot_position, self.node.START, self.RESOLUTION
+                    )
+                    dest_grid = convert_world_coordinates_to_grid(
+                        np.array(self.node.DESTINATION), self.node.START, self.RESOLUTION
+                    )
+
+                    if robot_grid != (None, None) and dest_grid != (None, None) and robot_grid == dest_grid:
+                        twist.linear.x = 0.0
+                        twist.linear.y = 0.0
+                        self.cmd_vel_pub.publish(twist)
+                        print("Goal reached (same grid cell). Stopping robot.")
+                        return 'goal_reached'
+
+                    # Fallback: accept being within approx. 1 grid cell
+                    dist = np.linalg.norm(current_robot_position - np.array(self.node.DESTINATION))
+                    threshold = max(self.RESOLUTION * 1.5, 0.1)  # allow ~1.5 cells but not smaller than 0.1m
+                    if dist < threshold:
+                        twist.linear.x = 0.0
+                        twist.linear.y = 0.0
+                        self.cmd_vel_pub.publish(twist)
+                        print(f"Goal reached within {dist:.3f} m. Stopping robot.")
+                        return 'goal_reached'
+
+                    print(f"Not at goal (grid robot={robot_grid}, dest={dest_grid}, dist={dist:.3f}); recalculating")
+                    return 'create_waypoints'
             self.control_loop()
             return 'driving_to_goal'

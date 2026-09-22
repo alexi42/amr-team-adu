@@ -142,7 +142,6 @@ class GridCell():
                         cell_details[new_i][new_j].parent_i = i
                         cell_details[new_i][new_j].parent_j = j
                         print("The destination cell is found")
-                        # Trace and print the path from source to destination
                         found_dest = True
                         return self.trace_path(cell_details, dest_grid)
                     else:

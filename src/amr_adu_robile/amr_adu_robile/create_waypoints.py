@@ -8,7 +8,6 @@ from nav_msgs.msg import Odometry, Path, OccupancyGrid, MapMetaData
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import PoseStamped, Pose, Point
 from tf_transformations import euler_from_quaternion
-from itertools import chain
 
 
 class CreateWaypoints(smach.State):
@@ -18,7 +17,7 @@ class CreateWaypoints(smach.State):
     """
 
     def __init__(self, node, ROW, COL, RESOLUTION,
-                 q_goal=np.array([3.0, 1.5])):
+                 q_goal=np.array([-3.0, 1.2])):
         smach.State.__init__(self, outcomes=[
             'create_waypoints',
             'driving_to_goal'
@@ -29,7 +28,9 @@ class CreateWaypoints(smach.State):
         self.robot_position = np.array([0.0, 0.0])
         self.waypoints = None
         self.latest_scan = None
-        self.occupancy_grid = None
+        self.occupancy_grid_map = None
+
+        self.node.DESTINATION = q_goal
 
         # Occupancy grid parameters
         self.ROW = ROW
@@ -74,8 +75,8 @@ class CreateWaypoints(smach.State):
         # Initialize START from first odometry reading to handle floating-point precision
         if self.node.START is None:
             self.node.START = (
-                self.robot_position[0] - (self.ROW // 2) * self.RESOLUTION,
-                self.robot_position[1] - (self.COL // 2) * self.RESOLUTION,
+                self.robot_position[0] - (self.ROW * self.RESOLUTION) / 2.0,
+                self.robot_position[1] - (self.COL * self.RESOLUTION) / 2.0,
             )
 
         # Extract yaw angle from quaternion
@@ -88,7 +89,11 @@ class CreateWaypoints(smach.State):
         self.latest_scan = msg
 
     def write_obstacles_into_grid(self):
-        grid = np.zeros((self.ROW, self.COL), dtype=np.uint8)
+        if self.node.START is None:
+            return np.zeros((self.ROW, self.COL))
+        if self.occupancy_grid_map is None:
+            self.occupancy_grid_map = np.zeros((self.ROW, self.COL), dtype=np.uint8)
+        grid = self.occupancy_grid_map
         if self.latest_scan is not None:
             obstacles_base = convert_scan_to_obstacles(self.latest_scan)
             for obstacle_base in obstacles_base:
@@ -100,7 +105,8 @@ class CreateWaypoints(smach.State):
                     self.node.START,
                     self.RESOLUTION
                 )
-
+                if row is None or col is None:
+                    continue
                 if 0 <= row < self.ROW and 0 <= col < self.COL:
                     grid[row][col] = 1
 
@@ -111,6 +117,7 @@ class CreateWaypoints(smach.State):
                             inflated_col = col + d_col
                             if 0 <= inflated_row < self.ROW and 0 <= inflated_col < self.COL:
                                 grid[inflated_row][inflated_col] = 1
+            self.occupancy_grid_map = grid
         return grid
 
     def execute(self, userdata):
@@ -125,19 +132,21 @@ class CreateWaypoints(smach.State):
             origin_point = Point()
             origin_point.x = float(self.node.START[0])
             origin_point.y = float(self.node.START[1])
+
             origin_pose = Pose()
             origin_pose.position = origin_point
+            origin_pose.orientation.w = 1.0
 
             map_meta_data_msg = MapMetaData()
             map_meta_data_msg.resolution = self.RESOLUTION
-            map_meta_data_msg.width = self.ROW
-            map_meta_data_msg.height = self.COL
+            map_meta_data_msg.width = self.COL
+            map_meta_data_msg.height = self.ROW
             map_meta_data_msg.origin = origin_pose
 
             occupancy_grid_msg = OccupancyGrid()
             occupancy_grid_msg.info = map_meta_data_msg
             grid_two_dim = self.write_obstacles_into_grid()
-            grid_one_dim = [int(i) for i in chain.from_iterable(grid_two_dim)]
+            grid_one_dim = [int(i) for row in grid_two_dim for i in row]
             occupancy_grid_msg.data = grid_one_dim
             self.occupancy_grid.publish(occupancy_grid_msg)
 
@@ -156,11 +165,7 @@ class CreateWaypoints(smach.State):
                 convert_grid_coordinates_to_world(w, start=self.node.START, res=self.RESOLUTION)
                 for w in self.waypoints
             ]
-
-            self.waypoints = [
-                transform_to_base_link(self, w)
-                for w in waypoints_world
-            ]
+            self.waypoints = waypoints_world
 
             path_msg = Path()
             path_msg.header.frame_id = 'odom'
