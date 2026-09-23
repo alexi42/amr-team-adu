@@ -64,34 +64,36 @@ def convert_scan_to_obstacles(scan):
     return obstacles
 
 
-def transform_to_base_link(self, point_odom):
+def transform_to_base_link(robot_position, robot_angle, point_world):
     """Transform a point from world frame to base_link frame."""
     # Translate to robot position
-    relative_pos = point_odom - self.robot_position
+    relative_pos = point_world - robot_position
 
     # Rotate by -robot_angle
-    cos_a = np.cos(-self.robot_angle)
-    sin_a = np.sin(-self.robot_angle)
+    cos_a = np.cos(-robot_angle)
+    sin_a = np.sin(-robot_angle)
 
     rotation_matrix = np.array([
         [cos_a, -sin_a],
         [sin_a, cos_a]
     ])
 
+    # Apply rotation
     point_base = rotation_matrix @ relative_pos
     return point_base
 
 
-def transform_to_world(self, point_base):
+def transform_to_world(robot_position, robot_angle, point_base):
     """Transform a point from base_link frame to world  frame."""
     # Rotate by robot_angle (positive rotation)
-    cos_a = np.cos(self.robot_angle)
-    sin_a = np.sin(self.robot_angle)
+    cos_a = np.cos(robot_angle)
+    sin_a = np.sin(robot_angle)
+
     rotation_matrix = np.array([
         [cos_a, -sin_a],
         [sin_a, cos_a]
     ])
 
     # Apply rotation then translation
-    point_world = rotation_matrix @ point_base + self.robot_position
+    point_world = rotation_matrix @ point_base + robot_position
     return point_world

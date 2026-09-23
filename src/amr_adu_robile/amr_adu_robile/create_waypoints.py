@@ -1,7 +1,7 @@
 import smach
 import numpy as np
 import threading
-from .conversion_script import convert_scan_to_obstacles, convert_grid_coordinates_to_world, convert_world_coordinates_to_grid, transform_to_world, transform_to_base_link
+from .conversion_script import convert_scan_to_obstacles, convert_grid_coordinates_to_world, convert_world_coordinates_to_grid, transform_to_world
 from .a_star_algorithm import GridCell
 
 from nav_msgs.msg import Odometry, Path, OccupancyGrid, MapMetaData
@@ -16,8 +16,7 @@ class CreateWaypoints(smach.State):
     Updating them if robot encountered obstacle.
     """
 
-    def __init__(self, node, ROW, COL, RESOLUTION,
-                 q_goal=np.array([-3.0, 1.2])):
+    def __init__(self, node, q_goal=np.array([3.0, 0.75])):
         smach.State.__init__(self, outcomes=[
             'create_waypoints',
             'driving_to_goal'
@@ -25,17 +24,14 @@ class CreateWaypoints(smach.State):
         self.node = node
         self.q_goal = q_goal
         self.rlock = threading.RLock()
+        self.lock = threading.Lock()
         self.robot_position = np.array([0.0, 0.0])
+        self.robot_angle = 0.0
         self.waypoints = None
         self.latest_scan = None
         self.occupancy_grid_map = None
 
         self.node.DESTINATION = q_goal
-
-        # Occupancy grid parameters
-        self.ROW = ROW
-        self.COL = COL
-        self.RESOLUTION = RESOLUTION
 
         # Subscriber to get robots current position
         self.odom_sub = self.node.create_subscription(
@@ -69,56 +65,56 @@ class CreateWaypoints(smach.State):
 
     def odom_callback(self, msg):
         """Update robot pose from odometry."""
-        self.robot_position[0] = msg.pose.pose.position.x
-        self.robot_position[1] = msg.pose.pose.position.y
+        with self.lock:
+            self.robot_position[0] = msg.pose.pose.position.x
+            self.robot_position[1] = msg.pose.pose.position.y
 
-        # Initialize START from first odometry reading to handle floating-point precision
-        if self.node.START is None:
-            self.node.START = (
-                self.robot_position[0] - (self.ROW * self.RESOLUTION) / 2.0,
-                self.robot_position[1] - (self.COL * self.RESOLUTION) / 2.0,
-            )
+            # Initialize START from first odometry reading to handle floating-point precision
+            if self.node.START is None:
+                self.node.START = (
+                    self.robot_position[0] - (self.node.ROW * self.node.RESOLUTION) / 2.0,
+                    self.robot_position[1] - (self.node.COL * self.node.RESOLUTION) / 2.0,
+                )
 
-        # Extract yaw angle from quaternion
-        quat = msg.pose.pose.orientation
-        _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
-        self.robot_angle = yaw
+            # Extract yaw angle from quaternion
+            quat = msg.pose.pose.orientation
+            _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
+            self.robot_angle = yaw
 
     def scan_callback(self, msg):
         """Store latest laser scan data."""
-        self.latest_scan = msg
+        with self.lock:
+            self.latest_scan = msg
 
-    def write_obstacles_into_grid(self):
-        if self.node.START is None:
-            return np.zeros((self.ROW, self.COL))
-        if self.occupancy_grid_map is None:
-            self.occupancy_grid_map = np.zeros((self.ROW, self.COL), dtype=np.uint8)
-        grid = self.occupancy_grid_map
-        if self.latest_scan is not None:
-            obstacles_base = convert_scan_to_obstacles(self.latest_scan)
+    def write_obstacles_into_grid(self, START, ROW, COL, RESOLUTION, occupancy_grid_map, scan, robot_position, robot_angle):
+        if START is None:
+            return np.zeros((ROW, COL), dtype=np.uint8)
+        if occupancy_grid_map is None:
+            occupancy_grid_map = np.zeros((ROW, COL), dtype=np.uint8)
+        if scan is not None:
+            obstacles_base = convert_scan_to_obstacles(scan)
             for obstacle_base in obstacles_base:
 
-                obstacle_world = transform_to_world(self, obstacle_base)
+                obstacle_world = transform_to_world(robot_position, robot_angle, obstacle_base)
 
                 row, col = convert_world_coordinates_to_grid(
                     obstacle_world,
-                    self.node.START,
-                    self.RESOLUTION
+                    START,
+                    RESOLUTION
                 )
                 if row is None or col is None:
                     continue
-                if 0 <= row < self.ROW and 0 <= col < self.COL:
-                    grid[row][col] = 1
+                if 0 <= row < ROW and 0 <= col < COL:
+                    occupancy_grid_map[row][col] = 1
 
-                    # Also mark neighbour cells as obstructed, staying inside the grid.
-                    for d_row in (-1, 0, 1):
-                        for d_col in (-1, 0, 1):
-                            inflated_row = row + d_row
-                            inflated_col = col + d_col
-                            if 0 <= inflated_row < self.ROW and 0 <= inflated_col < self.COL:
-                                grid[inflated_row][inflated_col] = 1
-            self.occupancy_grid_map = grid
-        return grid
+                # Also mark neighbour cells as obstructed, staying inside the grid.
+                for d_row in (-1, 0, 1):
+                    for d_col in (-1, 0, 1):
+                        inflated_row = row + d_row
+                        inflated_col = col + d_col
+                        if 0 <= inflated_row < ROW and 0 <= inflated_col < COL:
+                            occupancy_grid_map[inflated_row][inflated_col] = 1
+        return occupancy_grid_map
 
     def execute(self, userdata):
         """Create waypoints or update them after encountering new obstacle."""
@@ -126,7 +122,7 @@ class CreateWaypoints(smach.State):
             if self.node.START is None or self.latest_scan is None:
                 return 'create_waypoints'
 
-            gridcell = GridCell(ROW=self.ROW, COL=self.COL, RESOLUTION=self.RESOLUTION)
+            gridcell = GridCell(ROW=self.node.ROW, COL=self.node.COL, RESOLUTION=self.node.RESOLUTION)
             current_position = self.robot_position
 
             origin_point = Point()
@@ -138,17 +134,21 @@ class CreateWaypoints(smach.State):
             origin_pose.orientation.w = 1.0
 
             map_meta_data_msg = MapMetaData()
-            map_meta_data_msg.resolution = self.RESOLUTION
-            map_meta_data_msg.width = self.COL
-            map_meta_data_msg.height = self.ROW
+            map_meta_data_msg.resolution = self.node.RESOLUTION
+            map_meta_data_msg.width = self.node.COL
+            map_meta_data_msg.height = self.node.ROW
             map_meta_data_msg.origin = origin_pose
 
             occupancy_grid_msg = OccupancyGrid()
             occupancy_grid_msg.info = map_meta_data_msg
-            grid_two_dim = self.write_obstacles_into_grid()
+            grid_two_dim = self.write_obstacles_into_grid(
+                self.node.START, self.node.ROW, self.node.COL, self.node.RESOLUTION,
+                self.occupancy_grid_map, self.latest_scan, self.robot_position, self.robot_angle
+            )
             grid_one_dim = [int(i) for row in grid_two_dim for i in row]
             occupancy_grid_msg.data = grid_one_dim
             self.occupancy_grid.publish(occupancy_grid_msg)
+            self.occupancy_grid_map = grid_two_dim
 
             if np.any(grid_two_dim) or np.any(current_position) or self.q_goal is not None:
                 self.waypoints = gridcell.a_star_search(
@@ -162,7 +162,7 @@ class CreateWaypoints(smach.State):
                 return 'create_waypoints'
 
             waypoints_world = [
-                convert_grid_coordinates_to_world(w, start=self.node.START, res=self.RESOLUTION)
+                convert_grid_coordinates_to_world(w, start=self.node.START, res=self.node.RESOLUTION)
                 for w in self.waypoints
             ]
             self.waypoints = waypoints_world

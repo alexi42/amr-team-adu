@@ -11,14 +11,15 @@ class GoalReached(smach.State):
     """Robot reached goal and turns into given pose."""
 
     def __init__(self, node, theta_goal=0.5*np.pi,  # 0.5*pi -> 90°
-                 theta_goal_threshold=0.01, max_angular_velocity=0.8,
-                 min_angular_velocity=0.3):
+                 theta_goal_threshold=0.01, max_angular_velocity=0.1,
+                 min_angular_velocity=0.1):
         smach.State.__init__(self, outcomes=[
             'turning_to_given_orientation',
             'orientation_reached'
         ])
         self.node = node
         self.rlock = threading.RLock()
+        self.lock = threading.Lock()
         self.cmd_vel_pub = self.node.create_publisher(Twist, 'cmd_vel', 10)
         self.theta_goal = theta_goal
         self.theta_goal_threshold = theta_goal_threshold
@@ -43,14 +44,15 @@ class GoalReached(smach.State):
 
     def odom_callback(self, msg):
         """Update robot pose from odometry."""
-        # Extract yaw angle from quaternion
-        quat = msg.pose.pose.orientation
-        _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
-        self.robot_angle = yaw
+        with self.rlock:
+            # Extract yaw angle from quaternion
+            quat = msg.pose.pose.orientation
+            _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
+            self.robot_angle = yaw
 
     def execute(self, userdata):
         with self.rlock:
-            angle_error = self.calculate_angle_error(self.theta_goal)
+            angle_error = self.calculate_angle_error(self.theta_goal, self.robot_angle)
             twist = Twist()
 
             if abs(angle_error) < self.theta_goal_threshold:
@@ -77,9 +79,9 @@ class GoalReached(smach.State):
             self.cmd_vel_pub.publish(twist)
             return 'turning_to_given_orientation'
 
-    def calculate_angle_error(self, target_angle):
+    def calculate_angle_error(self, target_angle, robot_angle):
         """Calculate the smallest angle error between robot orientation and target angle."""
-        angle_error = target_angle - self.robot_angle
+        angle_error = target_angle - robot_angle
         # Normalize to [-pi, pi]
         angle_error = np.arctan2(np.sin(angle_error), np.cos(angle_error))
         return angle_error
