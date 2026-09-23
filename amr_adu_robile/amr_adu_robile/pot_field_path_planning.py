@@ -155,7 +155,8 @@ class GridCell():
                         return self.trace_path(cell_details, dest_grid)
                     else:
                         # Calculate the new f, g, and h values
-                        g_new = cell_details[i][j].g + 1.0
+                        move_cost = np.sqrt(dir[0] ** 2 + dir[1] ** 2)
+                        g_new = cell_details[i][j].g + move_cost
                         h_new = self.calculate_h_value(new_i, new_j, dest_grid)
                         f_new = g_new + h_new
 
@@ -181,7 +182,7 @@ class CreateWaypoints(smach.State):
     Updating them if robot encountered obstacle.
     """
 
-    def __init__(self, node, q_goal=np.array([-2, -6])):
+    def __init__(self, node, q_goal=np.array([0, -4])):
         smach.State.__init__(self, outcomes=[
             'create_waypoints',
             'driving_to_goal'
@@ -189,10 +190,20 @@ class CreateWaypoints(smach.State):
         self.node = node
         self.q_goal = q_goal
         self.lock = threading.Lock()
-        self.robot_position = np.array([0.3, -3.5])
+        self.robot_position = np.array([0.0, 0.0])
         self.waypoints = None
         self.latest_scan = None
         self.occupancy_grid_msg = None
+
+        # Persistent obstacle grid
+        self.grid = np.zeros((ROW, COL), dtype=np.uint8)
+
+        self.node.DESTINATION = q_goal
+
+        # Occupancy grid parameters
+        self.ROW = ROW
+        self.COL = COL
+        self.RESOLUTION = RESOLUTION
 
         # Subscriber to get robots current position
         self.odom_sub = self.node.create_subscription(
@@ -213,6 +224,12 @@ class CreateWaypoints(smach.State):
         self.path = self.node.create_publisher(
             Path,
             '/path',
+            10
+        )
+
+        self.occupancy_grid = self.node.create_publisher(
+            OccupancyGrid,
+            '/map',
             10
         )
 
@@ -241,7 +258,7 @@ class CreateWaypoints(smach.State):
             self.latest_scan = msg
 
     def write_obstacles_into_grid(self):
-        grid = np.zeros((ROW, COL), dtype=np.uint8)
+        grid = self.grid
         if self.latest_scan is not None:
             for obstacle_base in convert_scan_to_obstacles(self):
 
@@ -259,7 +276,7 @@ class CreateWaypoints(smach.State):
                     # Also mark neighbour cells as obstructed
                     grid[row][col-1] = 1
                     grid[row][col+1] = 1
-                    grid[row-1][col] = 11
+                    grid[row-1][col] = 1
                     grid[row+1][col] = 1
 
                     grid[row-1][col-1] = 1
@@ -331,6 +348,7 @@ class CreateWaypoints(smach.State):
 
         path_msg.poses = waypoint_poses
         self.path.publish(path_msg)
+        self.occupancy_grid.publish(occupancy_grid_msg)
         return 'driving_to_goal'
 
 
@@ -338,7 +356,7 @@ class FollowWaypoints(smach.State):
     """
     State to follow waypoints.
     """
-    def __init__(self, node, k_a=1.0, k_r=0.5, rho_0=0.5,
+    def __init__(self, node, k_a=1.0, k_r=0.5, rho_0=0.35,
                  max_linear_velocity=0.5, max_angular_velocity=0.8):
         smach.State.__init__(self, outcomes=[
             'driving_to_goal',
@@ -355,6 +373,7 @@ class FollowWaypoints(smach.State):
         self.k_a = k_a  # Attractive force gain
         self.k_r = k_r  # Repulsive force gain
         self.rho_0 = rho_0  # Threshold distance for obstacle influence
+ 
 
         # Velocity parameters
         self.max_linear_velocity = max_linear_velocity  # m/s
@@ -489,9 +508,14 @@ class FollowWaypoints(smach.State):
                 ])
                 for pose in msg.poses
             ]
-            # delete first and second waypoint since they are too close to the robot's current position
-            del self.path_waypoints[0]
-            del self.path_waypoints[0]
+            # delete first and second waypoint if they are in a certain distance from robot
+            min_waypoint_distance = 0.3
+
+            self.path_waypoints = [
+                wp for wp in self.path_waypoints
+                if np.linalg.norm(wp - self.robot_position)
+                > min_waypoint_distance
+            ]
 
     def publish_local_plan(self, obstacles, horizon=3.0, dt=0.1):
         """Predict robot motion for the next few seconds and publish it."""
@@ -592,13 +616,32 @@ class FollowWaypoints(smach.State):
 
             force_direction = total_force / force_magnitude
 
+            """----> LES BIAS FOR REVERSING """
+            # linear_vel = np.clip(
+            #     force_magnitude * self.linear_gain,
+            #     0,
+            #     self.max_linear_velocity
+            # )
+
+            # v = force_direction[0] * linear_vel
+
+            # angle_to_force = np.arctan2(
+            #     force_direction[1],
+            #     force_direction[0]
+            # )
+
+            # omega = np.clip(
+            #     angle_to_force,
+            #     -self.max_angular_velocity,
+            #     self.max_angular_velocity
+            # )
+
+            """----> MORE BIAS FOR REVERSING"""
             linear_vel = np.clip(
                 force_magnitude * self.linear_gain,
-                0,
+                0.0,
                 self.max_linear_velocity
             )
-
-            v = force_direction[0] * linear_vel
 
             angle_to_force = np.arctan2(
                 force_direction[1],
@@ -611,10 +654,12 @@ class FollowWaypoints(smach.State):
                 self.max_angular_velocity
             )
 
-            # -------------------------------
-            # Predict differential-drive motion
-            # -------------------------------
+            # Same forward-only behavior as the real controller.
+            # More heading error -> less forward speed.
+            heading_factor = max(0.0, np.cos(angle_to_force))
+            v = linear_vel * heading_factor
 
+            # Predict differential-drive motion
             x += v * np.cos(theta) * dt
             y += v * np.sin(theta) * dt
             theta += omega * dt
@@ -626,6 +671,8 @@ class FollowWaypoints(smach.State):
 
         self.local_plan_pub.publish(path_msg)
 
+    
+
     def control_loop(self):
         """Compute and publish velocity commands."""
         with self.lock:
@@ -634,6 +681,9 @@ class FollowWaypoints(smach.State):
                 return 'create_waypoints'
 
             self.q_goal = self.path_waypoints[0]
+
+            if self.q_goal is None:
+                return 'create_waypoints'
 
             # Otherwise run potential-field based control
             obstacles = convert_scan_to_obstacles(self)
@@ -653,14 +703,28 @@ class FollowWaypoints(smach.State):
 
             twist = Twist()
             if force_magnitude > 1e-6:
+          
                 force_direction = total_force / force_magnitude
-                linear_vel = np.clip(force_magnitude * self.linear_gain, 0,
-                                     self.max_linear_velocity)
+
+                linear_vel = np.clip(
+                    force_magnitude * self.linear_gain,
+                    0,
+                    self.max_linear_velocity
+                )
+
                 twist.linear.x = force_direction[0] * linear_vel
-                angle_to_force = np.arctan2(force_direction[1], force_direction[0])
-                twist.angular.z = np.clip(angle_to_force,
-                                          -self.max_angular_velocity,
-                                          self.max_angular_velocity)
+
+
+                angle_to_force = np.arctan2(
+                    force_direction[1],
+                    force_direction[0]
+                )
+
+                twist.angular.z = np.clip(
+                    angle_to_force,
+                    -self.max_angular_velocity,
+                    self.max_angular_velocity
+                )
 
             self.cmd_vel_pub.publish(twist)
 
@@ -706,8 +770,6 @@ class FollowWaypoints(smach.State):
             repulsive_force += self.k_r * term1 * term2 * direction
         return repulsive_force
 
-    
-
     def execute(self, userdata):
         current_robot_position = self.robot_position
         if not self.path_waypoints:
@@ -716,7 +778,7 @@ class FollowWaypoints(smach.State):
         epsilon = 0.15
 
         if self.obstacles is not None and self.path_waypoints is not None:
-            for wp in self.path_waypoints:
+            for wp in self.path_waypoints[:5]:
                 for obstacle in self.obstacles:
                     # wp_base_link = transform_to_base_link(self, wp)
                     wp_grid = convert_world_coordinates_to_grid(wp, START, RESOLUTION)
