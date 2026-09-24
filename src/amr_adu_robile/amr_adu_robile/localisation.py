@@ -1,6 +1,5 @@
 
 from pathlib import Path
-
 import numpy as np
 import yaml
 from PIL import Image
@@ -10,12 +9,12 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.parameter import Parameter
 from rclpy.time import Time
+from rclpy.duration import Duration
 
 from nav_msgs.msg import OccupancyGrid, Odometry
 from geometry_msgs.msg import Pose, PoseArray, TransformStamped, PoseStamped
 from sensor_msgs.msg import LaserScan
 from scipy.ndimage import distance_transform_edt
-
 
 from tf_transformations import (
     euler_from_quaternion,
@@ -39,11 +38,12 @@ class ParticleFilter(Node):
             '/home/trgtulas/amr_ws/src/amr_adu_robile/amr_adu_robile/maps/closed_walls_map.yaml'
             )
 
-        self.declare_parameter('num_particles', 300)
+        self.declare_parameter('num_particles', 1500)
 
         map_path = self.get_parameter('map_yaml').value
 
         self.num_particles = self.get_parameter('num_particles').value
+
 
         if not map_path:
             raise ValueError('Provide the map_yaml parameter.')
@@ -51,6 +51,11 @@ class ParticleFilter(Node):
         self.rng = np.random.default_rng()
         self.particles = None
         self.last_odom = None
+
+        # For frame transmission
+        self.last_odom_stamp = None
+        self.odom_frame = 'odom'
+        self.base_frame = None
 
         # Allow RViz to receive the map even if it opens later.
         map_qos = QoSProfile(depth=1)
@@ -103,7 +108,7 @@ class ParticleFilter(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         # Keep disabled until the pose estimate is verified.
-        self.declare_parameter('publish_map_tf', False)
+        self.declare_parameter('publish_map_tf', True)
 
         self.good_estimates = 0
 
@@ -122,8 +127,8 @@ class ParticleFilter(Node):
 
 
     def scan_callback(self, scan):
-        if self.particles is None:
-            return
+        if self.particles is None or self.base_frame is None:
+            return  
 
         # Process approximately two scans per second.
         scan_time = (
@@ -163,7 +168,7 @@ class ParticleFilter(Node):
         # Get the LiDAR's position relative to the robot.
         try:
             tf = self.tf_buffer.lookup_transform(
-                'base_link',
+                self.base_frame,
                 scan.header.frame_id,
                 Time()
             )
@@ -180,82 +185,72 @@ class ParticleFilter(Node):
             q.x, q.y, q.z, q.w
         ])
 
-        # Convert LiDAR endpoints to base_link coordinates.
-        lx = distances * np.cos(angles)
-        ly = distances * np.sin(angles)
+        # Calculate the LiDAR position for every particle.
+        theta = self.particles[:, 2]
 
-        c = np.cos(laser_yaw)
-        s = np.sin(laser_yaw)
-
-        bx = t.x + c * lx - s * ly
-        by = t.y + s * lx + c * ly
-
-        # Calculate hypothetical endpoints for every particle.
-        theta = self.particles[:, 2, None]
-
-        c = np.cos(theta)
-        s = np.sin(theta)
-
-        endpoint_x = (
-            self.particles[:, 0, None]
-            + c * bx[None, :]
-            - s * by[None, :]
+        laser_x = (
+            self.particles[:, 0]
+            + np.cos(theta) * t.x
+            - np.sin(theta) * t.y
         )
 
-        endpoint_y = (
-            self.particles[:, 1, None]
-            + s * bx[None, :]
-            + c * by[None, :]
+        laser_y = (
+            self.particles[:, 1]
+            + np.sin(theta) * t.x
+            + np.cos(theta) * t.y
         )
 
-        # Convert endpoints from world to map-grid coordinates.
-        ox, oy, origin_theta = self.origin
-
-        dx = endpoint_x - ox
-        dy = endpoint_y - oy
-
-        c = np.cos(origin_theta)
-        s = np.sin(origin_theta)
-
-        cols = np.floor(
-            (c * dx + s * dy) / self.resolution
-        ).astype(int)
-
-        rows = np.floor(
-            (-s * dx + c * dy) / self.resolution
-        ).astype(int)
-
-        inside = (
-            (rows >= 0)
-            & (rows < self.height)
-            & (cols >= 0)
-            & (cols < self.width)
+        # Direction of each LiDAR beam for every particle.
+        ray_angles = (
+            theta[:, None]
+            + laser_yaw
+            + angles[None, :]
         )
 
-        wall_distance = np.full(endpoint_x.shape, np.inf)
+        # Limit ray casting to 8 metres for this first test.
+        max_range = min(float(scan.range_max), 8.0)
 
-        wall_distance[inside] = self.distance_map[
-            rows[inside],
-            cols[inside]
-        ]
+        # What would each particle see at its hypothetical pose?
+        predicted = self.ray_cast(
+            laser_x,
+            laser_y,
+            ray_angles,
+            max_range
+        )
 
-        # Measurement likelihood: endpoints near walls score higher.
-        sigma = 0.25
+        # Compare predictions against the real LiDAR measurements.
+        observed = np.minimum(distances, max_range)
+        errors = predicted - observed[None, :]
+
+        # Small distance errors produce higher likelihoods.
+        sigma = 0.20
 
         probabilities = (
-            0.10
-            + 0.90 * np.exp(
-                -0.5 * (wall_distance / sigma) ** 2
+            0.05
+            + 0.95 * np.exp(
+                -0.5 * (errors / sigma) ** 2
             )
         )
 
-        # Combine the beams using log-likelihoods.
+        # Combine all selected beams to calculate particle weights.
         log_weights = np.sum(np.log(probabilities), axis=1)
-
         log_weights -= np.max(log_weights)
 
         weights = np.exp(log_weights)
         weights /= np.sum(weights)
+
+
+
+        estimate = self.estimate_pose(weights)
+
+        if estimate is not None:
+            self.publish_estimated_pose(
+                estimate,
+                scan.header.stamp
+            )
+
+            if self.get_parameter('publish_map_tf').value:
+                self.publish_map_to_odom(estimate)
 
         # Resample using the calculated particle weights.
         self.resample_particles(weights)
@@ -267,8 +262,76 @@ class ParticleFilter(Node):
                 f'Completed {self.scan_updates} LiDAR updates.'
             )
 
+    def ray_cast(self, laser_x, laser_y, ray_angles, max_range):
+        # One predicted distance for every particle and LiDAR beam.
+        predicted = np.full(ray_angles.shape, max_range)
+        active = np.ones(ray_angles.shape, dtype=bool)
 
+        # Direction of every simulated beam.
+        direction_x = np.cos(ray_angles)
+        direction_y = np.sin(ray_angles)
+
+        ox, oy, map_yaw = self.origin
+        c = np.cos(map_yaw)
+        s = np.sin(map_yaw)
+
+        # Move along the beams in steps of one map cell.
+        for distance in np.arange(
+            0.0, max_range, self.resolution
+        ):
+            if not np.any(active):
+                break
+
+            # Current point along each simulated beam.
+            x = (
+                laser_x[:, None]
+                + distance * direction_x
+            )
+            y = (
+                laser_y[:, None]
+                + distance * direction_y
+            )
+
+            # Convert world coordinates to map-grid coordinates.
+            dx = x - ox
+            dy = y - oy
+
+            cols = np.floor(
+                (c * dx + s * dy) / self.resolution
+            ).astype(int)
+
+            rows = np.floor(
+                (-s * dx + c * dy) / self.resolution
+            ).astype(int)
+
+            inside = (
+                (rows >= 0)
+                & (rows < self.height)
+                & (cols >= 0)
+                & (cols < self.width)
+            )
+
+            # Clip indices so we can safely access the grid.
+            safe_rows = np.clip(rows, 0, self.height - 1)
+            safe_cols = np.clip(cols, 0, self.width - 1)
+
+            # Stop each beam at its first occupied cell.
+            hit = (
+                active
+                & inside
+                & (self.grid[safe_rows, safe_cols] == 100)
+            )
+
+            predicted[hit] = distance
+            active[hit] = False
+
+            # Outside the known map: no mapped obstacle detected.
+            active[~inside] = False
+
+        return predicted
+    
     def resample_particles(self, weights):
+        # Standard resampling according to LiDAR weights.
         indices = self.rng.choice(
             self.num_particles,
             size=self.num_particles,
@@ -277,6 +340,19 @@ class ParticleFilter(Node):
         )
 
         self.particles = self.particles[indices].copy()
+
+        # Replace 5% with random recovery particles.
+        num_random = int(0.05 * self.num_particles)
+
+        replace_indices = self.rng.choice(
+            self.num_particles,
+            size=num_random,
+            replace=False
+        )
+
+        self.particles[replace_indices] = (
+            self.sample_random_particles(num_random)
+        )
 
     def estimate_pose(self, weights):
         best_index = np.argmax(weights)
@@ -296,8 +372,8 @@ class ParticleFilter(Node):
 
         # Select nearby particles with similar orientations.
         cluster = (
-            (distances < 0.6)
-            & (np.abs(angle_diff) < 0.7)
+            (distances < 0.5)
+            & (np.abs(angle_diff) < 0.6)
         )
 
         cluster_weight = np.sum(weights[cluster])
@@ -306,7 +382,7 @@ class ParticleFilter(Node):
         if np.count_nonzero(cluster) < 5:
             return None
 
-        if cluster_weight < 0.65:
+        if cluster_weight < 0.6:
             return None
 
         poses = self.particles[cluster]
@@ -349,7 +425,7 @@ class ParticleFilter(Node):
     def publish_estimated_pose(self, estimate, stamp):
         x, y, theta = estimate
 
-        msg = PoseStamped
+        msg = PoseStamped()
 
         msg.header.frame_id = 'map'
         msg.header.stamp = stamp
@@ -365,6 +441,53 @@ class ParticleFilter(Node):
         msg.pose.orientation.w = q[3]
 
         self.pose_pub.publish(msg)
+
+
+    def publish_map_to_odom(self, estimate):
+        if self.last_odom is None or self.last_odom_stamp is None:
+            return
+
+        # Robot pose estimated by our particle filter, in map.
+        xm, ym, theta_m = estimate
+
+        # The same robot's pose reported by odometry.
+        xo, yo, theta_o = self.last_odom
+
+        # Relative rotation: map -> odom.
+        yaw = theta_m - theta_o
+        yaw = np.arctan2(np.sin(yaw), np.cos(yaw))
+
+        c = np.cos(yaw)
+        s = np.sin(yaw)
+
+        # Relative translation from homogeneous transformation.
+        tx = xm - (c * xo - s * yo)
+        ty = ym - (s * xo + c * yo)
+
+        transform = TransformStamped()
+
+        # Publish slightly into the future so RViz can transform
+        # incoming sensor messages between localisation updates.
+        transform.header.stamp = (
+            Time.from_msg(self.last_odom_stamp)
+            + Duration(seconds=1.0)
+        ).to_msg()
+
+        transform.header.frame_id = 'map'
+        transform.child_frame_id = self.odom_frame
+
+        transform.transform.translation.x = float(tx)
+        transform.transform.translation.y = float(ty)
+        transform.transform.translation.z = 0.0
+
+        q = quaternion_from_euler(0.0, 0.0, float(yaw))
+
+        transform.transform.rotation.x = q[0]
+        transform.transform.rotation.y = q[1]
+        transform.transform.rotation.z = q[2]
+        transform.transform.rotation.w = q[3]
+
+        self.tf_broadcaster.sendTransform(transform)
 
     def load_map(self, yaml_path):
         yaml_path = Path(yaml_path).expanduser().resolve()
@@ -415,32 +538,33 @@ class ParticleFilter(Node):
             ~occupied
         ) * self.resolution
 
-
-    def initialise_particles(self):
-        # Only initialise particles in known free cells.
+    def sample_random_particles(self, count):
+        # Find all known free cells in the saved map.
         free_rows, free_cols = np.where(self.grid == 0)
 
         if len(free_rows) == 0:
             raise ValueError('The map contains no free cells.')
 
+        # Randomly select free cells.
         indices = self.rng.choice(
             len(free_rows),
-            size=self.num_particles,
+            size=count,
             replace=True
         )
 
         rows = free_rows[indices]
         cols = free_cols[indices]
 
-        # Random position inside each selected cell.
+        # Random positions inside the selected cells.
         local_x = (
-            cols + self.rng.random(self.num_particles)
+            cols + self.rng.random(count)
         ) * self.resolution
 
         local_y = (
-            rows + self.rng.random(self.num_particles)
+            rows + self.rng.random(count)
         ) * self.resolution
 
+        # Convert grid positions into map coordinates.
         origin_x, origin_y, origin_theta = self.origin
 
         c = np.cos(origin_theta)
@@ -449,23 +573,27 @@ class ParticleFilter(Node):
         x = origin_x + c * local_x - s * local_y
         y = origin_y + s * local_x + c * local_y
 
-        theta = self.rng.uniform(
-            -np.pi,
-            np.pi,
+        # Random orientations between -pi and pi.
+        theta = self.rng.uniform(-np.pi, np.pi, count)
+
+        return np.column_stack((x, y, theta))
+
+    def initialise_particles(self):
+        self.particles = self.sample_random_particles(
             self.num_particles
         )
-
-        # One row = [x, y, theta].
-        self.particles = np.column_stack((x, y, theta))
 
         self.get_logger().info(
             f'Initialised {self.num_particles} particles.'
         )
 
-
     def odom_callback(self, msg):
         position = msg.pose.pose.position
         orientation = msg.pose.pose.orientation
+
+        self.last_odom_stamp = msg.header.stamp
+        self.odom_frame = msg.header.frame_id or 'odom'
+        self.base_frame = msg.child_frame_id or 'base_footprint'
 
         _, _, theta = euler_from_quaternion([
             orientation.x,
