@@ -120,7 +120,7 @@ class ParticleFilter(Node):
         # Publish both for RViz.
         self.timer = self.create_timer(
             1.0,
-            self.publish_particles()
+            self.publish_particles
         )
 
         self.get_logger().info('Particle filter started.')
@@ -227,10 +227,7 @@ class ParticleFilter(Node):
         sigma = 0.20
 
         probabilities = (
-            0.05
-            + 0.95 * np.exp(
-                -0.5 * (errors / sigma) ** 2
-            )
+            0.05 + 0.95 * np.exp(-0.5 * (errors / sigma) ** 2)
         )
 
         # Combine all selected beams to calculate particle weights.
