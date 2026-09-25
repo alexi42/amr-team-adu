@@ -35,10 +35,10 @@ class ParticleFilter(Node):
 
         self.declare_parameter(
             'map_yaml',
-            '/home/trgtulas/amr_ws/src/amr_adu_robile/amr_adu_robile/maps/closed_walls_map.yaml'
+            '../amr-team-adu/maps/lab_c-069.yaml'
             )
 
-        self.declare_parameter('num_particles', 1500)
+        self.declare_parameter('num_particles', 300)
 
         map_path = self.get_parameter('map_yaml').value
 
@@ -116,10 +116,11 @@ class ParticleFilter(Node):
         self.load_map(map_path)
         self.initialise_particles()
 
+        self.publish_map()
         # Publish both for RViz.
         self.timer = self.create_timer(
-            0.5,
-            self.publish_visualisation
+            1.0,
+            self.publish_particles()
         )
 
         self.get_logger().info('Particle filter started.')
