@@ -173,39 +173,36 @@ class WallFollowerExploration(Node):
         print("Distance to the wall on the right: ", right_distance)
 
         # The robot finds an obstacle ahead and turns left
-        if self.turn_left:
-            if front_distance is not None and front_distance < self.threshold_dist_wall:
-                self.set_mode(turn_left=True)
-                self.current_goal = self.get_turn_left_goal()
-                self.planner.set_goal(self.current_goal)
+        if front_distance is not None and front_distance < self.threshold_dist_wall:
+            self.set_mode(turn_left=True)
+            self.current_goal = self.get_turn_left_goal()
+            self.planner.set_goal(self.current_goal)
 
-                print("Corner detected, turning left.")
-                return
-            self.set_mode(follow=True)
+            print("Corner detected, turning left.")
+            return
+        self.set_mode(follow=True)
 
         # The right wall disappeared and the robot turns right until it can keep the distance to the wall again.
-        elif self.turn_right:
-            wall_reacquired = (right_distance is not None and right_distance < self.wall_reacquired_distance)
+        wall_reacquired = (right_distance is not None and right_distance < self.wall_reacquired_distance)
 
-            if not wall_reacquired:
-                self.current_goal = self.get_turn_right_goal()
-                self.planner.set_goal(self.current_goal)
-                return
-            self.set_mode(follow=True)
-            
-            next_point_base = np.array([0.5, -0.8])
-
-            if next_point_base is None:
-                self.current_goal = None
-                return
-
-            self.current_goal = self.base_point_to_odom(
-                next_point_base,
-                self.robot_angle,
-                self.robot_position,
-            )
+        if not wall_reacquired:
+            self.current_goal = self.get_turn_right_goal()
             self.planner.set_goal(self.current_goal)
             return
+        self.set_mode(follow=True)
+
+        next_point_base = np.array([0.5, -0.8])
+
+        if next_point_base is None:
+            self.current_goal = None
+            return
+
+        self.current_goal = self.base_point_to_odom(
+            next_point_base,
+            self.robot_angle,
+            self.robot_position,
+        )
+        self.planner.set_goal(self.current_goal)
 
         # Detect a real obstacle ahead
         if (
