@@ -1,5 +1,6 @@
 import rclpy
 import numpy as np
+import subprocess
 from .a_star_algorithm import GridCell
 from .conversion_script import convert_grid_coordinates_to_world, convert_world_coordinates_to_grid
 
@@ -169,6 +170,7 @@ class WallFollowerExploration(Node):
             self.stop_robot()
             self.set_mode()
             self.current_goal = None
+            self.exploration_done_callback()
             print("Mapping complete!")
             return
         elif coverage >= 0.80:
@@ -199,11 +201,13 @@ class WallFollowerExploration(Node):
                     self.stop_robot()
                     self.set_mode()
                     self.current_goal = None
+                    self.exploration_done_callback()
                     print("Can't calculate a path to the next unknown cell.")
             else:
                 self.stop_robot()
                 self.set_mode()
                 self.current_goal = None
+                self.exploration_done_callback()
                 print("No unknown cells remain. Mapping complete.")
         else:
             # Robot still needs to explore the environment
@@ -569,6 +573,13 @@ class WallFollowerExploration(Node):
         self.planner.set_goal(None)
         twist = Twist()
         self.cmd_vel_pub.publish(twist)
+
+    def exploration_done_callback(self):
+        subprocess.run([
+            'ros2', 'run', 'nav2_map_server', 'map_saver_cli',
+            '-f', f'../amr-team-adu/maps/simulation-closed-walls',
+            '-t', 'map',
+        ], check=True)
 
 def main(args=None):
     rclpy.init(args=args)
