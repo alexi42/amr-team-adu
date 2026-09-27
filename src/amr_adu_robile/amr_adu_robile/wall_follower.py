@@ -1,18 +1,19 @@
 import rclpy
 import numpy as np
+
 from rclpy.node import Node
 from .pot_field_path_planning import PotentialFieldPathPlanner
-
-from nav_msgs.msg import Odometry, Path, OccupancyGrid, MapMetaData
+from nav_msgs.msg import Odometry, OccupancyGrid, MapMetaData
 from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import PoseStamped, Pose, Point, Twist
+from geometry_msgs.msg import Pose, Point, Twist
 from tf_transformations import euler_from_quaternion
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, qos_profile_sensor_data
 
 # Code inspired by https://github.com/HBRS-AMR/Robile/blob/main/robile_navigation/robile_navigation_demo/ros/scripts/wall_follower.py
 
 ROW = 1000
 COL = 1000
-RESOLUTION = 0.25
+RESOLUTION = 0.05
 START = None
 
 class WallFollowerExploration(Node):
@@ -48,6 +49,9 @@ class WallFollowerExploration(Node):
 
         # Occupancy grid map
         self.occupancy_grid_map = None
+        map_qos = QoSProfile(depth=1)
+        map_qos.reliability = ReliabilityPolicy.RELIABLE
+        map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
 
         # Subscribers
 
@@ -62,7 +66,7 @@ class WallFollowerExploration(Node):
             LaserScan,
             '/scan',
             self.scan_callback,
-            10,
+            qos_profile_sensor_data
         )
 
         # Publisher
@@ -82,7 +86,7 @@ class WallFollowerExploration(Node):
         self.occupancy_grid_pub = self.create_publisher(
             OccupancyGrid,
             '/map',
-            10
+            map_qos
         )
 
         # Control loop timer
@@ -94,8 +98,16 @@ class WallFollowerExploration(Node):
 
     def odom_callback(self, msg):
         """Update robot pose from odometry."""
+        global START
         self.robot_position[0] = msg.pose.pose.position.x
         self.robot_position[1] = msg.pose.pose.position.y
+
+        # Initialize START from first odometry reading
+        if START is None:
+            START = (
+                self.robot_position[0] - (ROW * RESOLUTION) / 2.0,
+                self.robot_position[1] - (COL * RESOLUTION) / 2.0,
+            )
 
         # Extract yaw angle from quaternion
         quat = msg.pose.pose.orientation
@@ -104,12 +116,8 @@ class WallFollowerExploration(Node):
 
     def scan_callback(self, msg):
         """Store latest laser scan data."""
-        global START
         self.latest_scan = msg
         self.latest_scan_cartesian = self.convert_scan_to_cartesian_coordinates(msg)
-
-        if START is None:
-            START = self.robot_position.copy()
 
         self.update_occupancy_grid(msg, self.robot_position, self.robot_angle)
 
@@ -378,8 +386,8 @@ class WallFollowerExploration(Node):
         if x is None or y is None:
             return None, None
 
-        row = int(round((x - start[0]) / res))
-        col = int(round((y - start[1]) / res))
+        row = int(round((y - start[1]) / res))
+        col = int(round((x - start[0]) / res))
         return row, col
 
     def convert_scan_to_obstacles(self, scan):
@@ -406,6 +414,9 @@ class WallFollowerExploration(Node):
         return obstacles
 
     def publish_occupancy_grid_map(self, occupancy_grid_map):
+        if START is None:
+            return
+
         origin_point = Point()
         origin_point.x = float(START[0])
         origin_point.y = float(START[1])
@@ -421,6 +432,8 @@ class WallFollowerExploration(Node):
         map_meta_data_msg.origin = origin_pose
 
         occupancy_grid_msg = OccupancyGrid()
+        occupancy_grid_msg.header.stamp = self.get_clock().now().to_msg()
+        occupancy_grid_msg.header.frame_id = 'odom'
         occupancy_grid_msg.info = map_meta_data_msg
         grid_one_dim = [int(i) for row in occupancy_grid_map for i in row]
         occupancy_grid_msg.data = grid_one_dim
@@ -429,13 +442,13 @@ class WallFollowerExploration(Node):
     def update_occupancy_grid(self, scan, robot_position, robot_angle):
         """Mark visible cells as free and detected endpoints as occupied."""
         if self.occupancy_grid_map is None:
-            self.occupancy_grid_map = np.full((ROW, COL), -1, dtype=np.int8)
+            self.occupancy_grid_map = np.full((COL, ROW), -1, dtype=np.int8)
 
         robot_row, robot_col = self.convert_world_coordinates_to_grid(
             robot_position, START, RESOLUTION,
         )
 
-        if robot_row is None:
+        if robot_row is None or robot_col is None:
             return
 
         for index, range_value in enumerate(scan.ranges):
@@ -462,7 +475,9 @@ class WallFollowerExploration(Node):
 
             end_row, end_col = (
                 self.convert_world_coordinates_to_grid(
-                    endpoint_world, START, RESOLUTION
+                    endpoint_world,
+                    START,
+                    RESOLUTION
                 )
             )
 
@@ -477,13 +492,13 @@ class WallFollowerExploration(Node):
             for row, col in ray_cells[:-1]:
                 if 0 <= row < ROW and 0 <= col < COL:
                     # Do not erase a previously detected obstacle.
-                    if self.occupancy_grid_map[row, col] != 1:
+                    if self.occupancy_grid_map[row, col] != 100:
                         self.occupancy_grid_map[row, col] = 0
 
             # Only mark the endpoint occupied when the beam returned before range_max.
             if has_obstacle:
                 if 0 <= end_row < ROW and 0 <= end_col < COL:
-                    self.occupancy_grid_map[end_row, end_col] = 1
+                    self.occupancy_grid_map[end_row, end_col] = 100
 
         self.publish_occupancy_grid_map(self.occupancy_grid_map)
 
