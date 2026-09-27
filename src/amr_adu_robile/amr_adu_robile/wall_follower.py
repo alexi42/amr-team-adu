@@ -155,22 +155,13 @@ class WallFollowerExploration(Node):
 
             print("Next goal: ", self.current_goal)
 
-        if not self.planner.goal_reached():
-            return
+        # if not self.planner.goal_reached():
+        #     return
+        # weitermachen
 
         front_distance = self.get_min_distance(
-                    self.latest_scan,
-                    -np.pi / 6.0,
-                    np.pi / 6.0,
+                    self.latest_scan, -np.pi / 6.0, np.pi / 6.0
                 )
-        print("Distance to the wall in the front: ", front_distance)
-
-        right_distance = self.get_min_distance(
-            self.latest_scan,
-            -np.pi / 2.0,
-            -np.pi / 6.0,
-        )
-        print("Distance to the wall on the right: ", right_distance)
 
         # The robot finds an obstacle ahead and turns left
         if front_distance is not None and front_distance < self.threshold_dist_wall:
@@ -180,60 +171,25 @@ class WallFollowerExploration(Node):
 
             print("Corner detected, turning left.")
             return
-        self.set_mode(follow=True)
+
+        right_distance = self.get_min_distance(
+            self.latest_scan, -np.pi / 2.0, 0.0
+        )
 
         # The right wall disappeared and the robot turns right until it can keep the distance to the wall again.
-        wall_reacquired = (right_distance is not None and right_distance < self.wall_reacquired_distance)
-
-        if not wall_reacquired:
-            self.current_goal = self.get_turn_right_goal()
+        if right_distance is not None and right_distance > self.threshold_dist_wall:
+            self.set_mode(turn_right=True)
+            self.current_goal = self.get_turn_right_goal(distance=self.threshold_dist_wall)
             self.planner.set_goal(self.current_goal)
+            print("Wall disappeared, turning right to find wall again.")
             return
         self.set_mode(follow=True)
 
-        next_point_base = np.array([0.5, -0.8])
+        next_point_base = self.get_max_range_point(self.latest_scan)
 
         if next_point_base is None:
             self.current_goal = None
             return
-
-        self.current_goal = self.base_point_to_odom(
-            next_point_base,
-            self.robot_angle,
-            self.robot_position,
-        )
-        self.planner.set_goal(self.current_goal)
-
-        # Detect a real obstacle ahead
-        if (
-            front_distance is not None
-            and front_distance < self.front_obstacle_distance
-        ):
-            self.set_mode(turn_left=True)
-            self.current_goal = self.get_turn_left_goal()
-            self.planner.set_goal(self.current_goal)
-            return
-
-        # Detect that the right wall has disappeared.
-        wall_lost = (
-            right_distance is None
-            or right_distance > self.right_wall_lost_distance
-        )
-
-        if wall_lost:
-            self.set_mode(turn_right=True)
-            self.current_goal = self.get_turn_right_goal()
-            self.planner.set_goal(self.current_goal)
-            return
-
-        # Follow right-wall
-        next_point_base = self.get_max_range_point(self.latest_scan)
-
-        if next_point_base is None:
-            print("No valid point found for the next goal.")
-            return
-
-        self.set_mode(follow=True)
 
         self.current_goal = self.base_point_to_odom(
             next_point_base, self.robot_angle, self.robot_position)
@@ -302,9 +258,7 @@ class WallFollowerExploration(Node):
         """Return the farthest valid scan point in base_link coordinates."""
         points = (
             self.convert_scan_to_cartesian_coordinates_in_certain_angle(
-                scan,
-                -np.pi / 2.0,
-                np.pi / 6.0,
+                scan, -np.pi / 2.0, 0.0
             )
         )
 
@@ -321,10 +275,7 @@ class WallFollowerExploration(Node):
     def get_min_distance(self, scan, min_angle, max_angle):
         points = (
             self.convert_scan_to_cartesian_coordinates_in_certain_angle(
-                scan,
-                min_angle,
-                max_angle,
-            )
+                scan, min_angle, max_angle)
         )
 
         if not points:
@@ -342,9 +293,9 @@ class WallFollowerExploration(Node):
             self.robot_position,
         )
 
-    def get_turn_right_goal(self, distance=0.8):
+    def get_turn_right_goal(self, distance):
         """Return a point in front-right of the robot, in odom coordinates."""
-        point_base = np.array([distance, -0.8])
+        point_base = np.array([distance, -0.4])
 
         return self.base_point_to_odom(
             point_base,
