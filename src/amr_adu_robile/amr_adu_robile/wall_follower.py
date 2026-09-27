@@ -1,8 +1,10 @@
 import rclpy
 import numpy as np
+from .a_star_algorithm import GridCell
+from .conversion_script import convert_grid_coordinates_to_world, convert_world_coordinates_to_grid
 
 from rclpy.node import Node
-from .pot_field_path_planning import PotentialFieldPathPlanner
+from .pot_field_path_planning_previous_code import PotentialFieldPathPlanner
 from nav_msgs.msg import Odometry, OccupancyGrid, MapMetaData
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Pose, Point, Twist
@@ -11,8 +13,8 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, qos_profi
 
 # Code inspired by https://github.com/HBRS-AMR/Robile/blob/main/robile_navigation/robile_navigation_demo/ros/scripts/wall_follower.py
 
-ROW = 1000
-COL = 1000
+ROW = 300
+COL = 300
 RESOLUTION = 0.05
 START = None
 
@@ -27,13 +29,12 @@ class WallFollowerExploration(Node):
         self.latest_scan = None
         self.robot_position = np.array([0.0, 0.0])
         self.robot_angle = 0.0
-        self.already_visited = None
-        self.next_goals = None
         self.threshold_dist_wall = 1.0
+        self.unknown_cells = None
 
         # Potential field path planner
         self.planner = None
-        self.current_goal = np.array([0.0, 0.0])
+        self.current_goal = None
         self.goal_tolerance = 0.2
 
         # Store in which mode the robot currently is
@@ -155,62 +156,103 @@ class WallFollowerExploration(Node):
         return scan_in_cartesian
 
     def explore_environment(self):
-        # start: rotate until closest point to wall found
-        # drive to wall and keep distance
-        # turn left and calculate next waypoint -> max range of scan sensor
-        # if in front wall, turn left
-        # avoid obstacles by driving on their left side around them then return to wall
-        # fill occupancy grid map
-        # when returned to start cell/known cell use A* to find closest path to next unknown cell
-        # continue mapping until A* can't find a path anymore
+        """Robot explores environment autonomously."""
         if self.latest_scan is None or self.planner is None:
             return
 
         if self.occupancy_grid_map is None:
             self.occupancy_grid_map = np.full((ROW, COL), -1, dtype=np.int8)
 
-        # Drive to the closest point and follow the wall
-        if np.array_equal(self.current_goal, np.array([0.0, 0.0])):
-            wall_point_base = self.get_right_wall_target(self.latest_scan)
-
-            if wall_point_base is None:
-                print("No wall on the right side detected :(")
-                print("Starting to move around to find wall...")
-                self.move_around(self.latest_scan_cartesian)
-                return
-
-            self.current_goal = self.base_point_to_odom(
-                wall_point_base, self.robot_angle, self.robot_position)
-            self.planner.set_goal(self.current_goal)
-
-            print("Next goal: ", self.current_goal)
-
-        if not self.planner.goal_reached():
-            front_distance = self.get_min_distance(
-                self.latest_scan, -np.pi / 6.0, np.pi / 6.0
+        coverage = self.get_map_coverage()
+        if coverage >= 0.95:
+            # Robot has covered enough of the map
+            self.stop_robot()
+            self.set_mode()
+            self.current_goal = None
+            print("Mapping complete!")
+            return
+        elif coverage >= 0.80:
+            # Use A* algorithm to find the way to the first unknown cell
+            unknown_cols, unknown_rows = np.where(
+                self.occupancy_grid_map == -1
             )
+            self.unknown_cells = np.column_stack((unknown_cols, unknown_rows))
 
-            # The robot finds an obstacle ahead and turns left
-            if front_distance is not None and front_distance < self.threshold_dist_wall:
-                self.set_mode(turn_left=True)
-                self.current_goal = self.get_turn_left_goal()
+            if self.unknown_cells is not None:
+                dest = convert_grid_coordinates_to_world(self.unknown_cells[0], START, RESOLUTION)
+                print("Destination in grid cell: ", self.unknown_cells[0])
+                print("Destination in world", dest)
+                way_points = GridCell(ROW, COL, RESOLUTION).a_star_search(
+                    self.occupancy_grid_map,
+                    self.robot_position,
+                    dest,
+                    START
+                )
+                if way_points is not None:
+                    print("waypoints are not none.")
+                    for wp in way_points:
+                        self.current_goal = wp
+                        if self.planner.goal_reached():
+                            del self.unknown_cells[0]
+                            return
+                else:
+                    self.stop_robot()
+                    self.set_mode()
+                    self.current_goal = None
+                    print("Can't calculate a path to the next unknown cell.")
+            else:
+                self.stop_robot()
+                self.set_mode()
+                self.current_goal = None
+                print("No unknown cells remain. Mapping complete.")
+        else:
+            # Robot still needs to explore the environment
+            # Drive to the closest point and follow the wall
+            if self.current_goal is None:
+                wall_point_base = self.get_right_wall_target(self.latest_scan)
+
+                if wall_point_base is None:
+                    print("No wall on the right side detected :(")
+                    print("Starting to move around to find wall...")
+                    self.move_around(self.latest_scan_cartesian)
+                    return
+
+                self.current_goal = self.base_point_to_odom(
+                    wall_point_base, self.robot_angle, self.robot_position)
                 self.planner.set_goal(self.current_goal)
 
-                print("Corner detected, turning left.")
-                return
+            if not self.planner.goal_reached():
+                front_distance = self.get_min_distance(
+                    self.latest_scan, -np.pi / 6.0, np.pi / 6.0
+                )
 
-            right_distance = self.get_min_distance(
-                self.latest_scan, -np.pi / 2.0, 0.0
-            )
+                # The robot finds an obstacle ahead and turns left
+                if front_distance is not None and front_distance < self.threshold_dist_wall:
+                    self.set_mode(turn_left=True)
+                    self.current_goal = self.get_turn_left_goal()
+                    self.planner.set_goal(self.current_goal)
 
-            # The right wall disappeared and the robot turns right until it can keep the distance to the wall again.
-            if right_distance is not None and right_distance > self.threshold_dist_wall:
-                self.set_mode(turn_right=True)
-                self.current_goal = self.get_turn_right_goal(distance=self.threshold_dist_wall)
-                self.planner.set_goal(self.current_goal)
-                print("Wall disappeared, turning right to find wall again.")
-                return
-            self.set_mode(follow=True)
+                    print("Corner detected, turning left.")
+                    return
+
+                right_distance = self.get_min_distance(
+                    self.latest_scan, -np.pi / 2.0, 0.0
+                )
+
+                # The right wall disappeared and the robot turns right until it can keep the distance to the wall again.
+                if right_distance is not None and right_distance > self.threshold_dist_wall:
+                    if front_distance is not None and front_distance < self.threshold_dist_wall:
+                        self.set_mode(turn_left=True)
+                        self.current_goal = self.get_turn_left_goal()
+                        self.planner.set_goal(self.current_goal)
+                        print("Too close to wall. Turning away")
+                        return
+                    self.set_mode(turn_right=True)
+                    self.current_goal = self.get_turn_right_goal(distance=self.threshold_dist_wall)
+                    self.planner.set_goal(self.current_goal)
+                    print("Wall disappeared, turning right to find wall again.")
+                    return
+                self.set_mode(follow=True)
 
             next_point_base = self.get_max_range_point(self.latest_scan)
 
@@ -220,6 +262,7 @@ class WallFollowerExploration(Node):
 
             self.current_goal = self.base_point_to_odom(
                 next_point_base, self.robot_angle, self.robot_position)
+            print("Next goal: ", self.current_goal)
             self.planner.set_goal(self.current_goal)
 
     def find_wall(self, latest_scan_cartesian):
@@ -285,7 +328,7 @@ class WallFollowerExploration(Node):
         """Return the farthest valid scan point in base_link coordinates."""
         points = (
             self.convert_scan_to_cartesian_coordinates_in_certain_angle(
-                scan, -np.pi / 2.0, 0.0
+                scan, -np.pi / 3.0, 0.0
             )
         )
 
@@ -375,43 +418,6 @@ class WallFollowerExploration(Node):
         point_world = rotation_matrix @ point_base + robot_position
         return point_world
 
-    def convert_world_coordinates_to_grid(self, coord, start, res):
-        """Convert world coordinates to coordinates in the custom grid."""
-        if start is None or coord is None:
-            return None, None
-
-        x = coord[0]
-        y = coord[1]
-
-        if x is None or y is None:
-            return None, None
-
-        row = int(round((y - start[1]) / res))
-        col = int(round((x - start[0]) / res))
-        return row, col
-
-    def convert_scan_to_obstacles(self, scan):
-        """
-        Convert laser scan data to obstacle positions in base_link frame.
-
-        Returns list of obstacle positions as (x, y) in base_link coordinates.
-        """
-        obstacles = []
-        for i, range_val in enumerate(scan.ranges):
-            # Skip invalid readings
-            if range_val < scan.range_min or range_val > scan.range_max or np.isnan(range_val):
-                continue
-
-            # Calculate angle
-            angle = scan.angle_min + i * scan.angle_increment
-
-            # Convert to cartesian coordinates in base_link frame
-            x = range_val * np.cos(angle)
-            y = range_val * np.sin(angle)
-
-            obstacles.append(np.array([x, y]))
-
-        return obstacles
 
     def publish_occupancy_grid_map(self, occupancy_grid_map):
         if START is None:
@@ -444,7 +450,7 @@ class WallFollowerExploration(Node):
         if self.occupancy_grid_map is None:
             self.occupancy_grid_map = np.full((COL, ROW), -1, dtype=np.int8)
 
-        robot_row, robot_col = self.convert_world_coordinates_to_grid(
+        robot_col, robot_row = convert_world_coordinates_to_grid(
             robot_position, START, RESOLUTION,
         )
 
@@ -473,8 +479,8 @@ class WallFollowerExploration(Node):
                 robot_position, robot_angle, endpoint_base,
             )
 
-            end_row, end_col = (
-                self.convert_world_coordinates_to_grid(
+            end_col, end_row = (
+                convert_world_coordinates_to_grid(
                     endpoint_world,
                     START,
                     RESOLUTION
@@ -492,13 +498,13 @@ class WallFollowerExploration(Node):
             for row, col in ray_cells[:-1]:
                 if 0 <= row < ROW and 0 <= col < COL:
                     # Do not erase a previously detected obstacle.
-                    if self.occupancy_grid_map[row, col] != 100:
-                        self.occupancy_grid_map[row, col] = 0
+                    if self.occupancy_grid_map[col, row] != 100:
+                        self.occupancy_grid_map[col, row] = 0
 
             # Only mark the endpoint occupied when the beam returned before range_max.
             if has_obstacle:
                 if 0 <= end_row < ROW and 0 <= end_col < COL:
-                    self.occupancy_grid_map[end_row, end_col] = 100
+                    self.occupancy_grid_map[end_col, end_row] = 100
 
         self.publish_occupancy_grid_map(self.occupancy_grid_map)
 
@@ -533,6 +539,36 @@ class WallFollowerExploration(Node):
                 row += step_row
 
         return cells
+
+    def get_map_coverage(self):
+        if self.occupancy_grid_map is None:
+            return 0.0
+        known = self.occupancy_grid_map != -1
+        rows, cols = np.where(known)
+
+        if (rows.size or cols.size) == 0:
+            return 0.0
+
+        min_row, max_row = rows.min(), rows.max()
+        min_col, max_col = cols.min(), cols.max()
+
+        explored_area = self.occupancy_grid_map[
+            min_row:max_row + 1,
+            min_col:max_col + 1
+        ]
+
+        known_cells = np.count_nonzero(explored_area != -1)
+        total_cells = explored_area.size
+
+        if known_cells > 0 or total_cells > 0:
+            return known_cells / total_cells
+        else:
+            return 0.0
+
+    def stop_robot(self):
+        self.planner.set_goal(None)
+        twist = Twist()
+        self.cmd_vel_pub.publish(twist)
 
 def main(args=None):
     rclpy.init(args=args)

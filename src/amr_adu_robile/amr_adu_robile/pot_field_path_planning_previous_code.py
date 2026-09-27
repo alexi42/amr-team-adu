@@ -18,8 +18,8 @@ class PotentialFieldPathPlanner(Node):
     """
     def __init__(self, q_goal=np.array([3.0, 1.5]), theta_goal=-1.0,
                  goal_distance_threshold=0.1, goal_angle_threshold=0.1,
-                 k_a=0.6, k_r=0.5, rho_0=0.4,
-                 max_linear_velocity=0.3, max_angular_velocity=0.2):
+                 k_a=0.7, k_r=0.6, rho_0=0.5,
+                 max_linear_velocity=0.7, max_angular_velocity=0.7):
         super().__init__('potential_field_path_planner')
         # Goal parameters
         self.q_goal = q_goal
