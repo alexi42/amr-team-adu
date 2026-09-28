@@ -156,7 +156,7 @@ The robot stops completely.
 
 Our occupancy grid does not support dynamic obstacles. Once a cell is marked as occupied, it stays occupied.
 
-### Replanning
+#### Replanning
 
 If a new obstacle blocks the current path, the robot stops before calculating new waypoints.
 
