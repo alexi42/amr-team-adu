@@ -62,7 +62,7 @@ The localisation node needs an existing map.
 Run the node with the path to your map:
 
 ```bash
-ros2 launch amr_adu_robile localisation.py
+ros2 launch amr_adu_robile localisation
 ```
 
 For the real robot, set `use_sim_time` to `false`.
