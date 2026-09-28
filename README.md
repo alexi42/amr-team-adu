@@ -5,8 +5,8 @@ This project was developed for the Autonomous Mobile Robots course at Hochschule
 The project consists of three main tasks:
 
 1. Path and Motion Planning
-2. Monte Carlo Localisation
-3. SLAM and Autonomous Exploration
+2. Localisation (MCL)
+3. Environment Exploration
 
 The implementations were developed using ROS 2 Humble and tested in simulation and on the real Robile robot.
 
