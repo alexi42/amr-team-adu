@@ -35,7 +35,7 @@ class ParticleFilter(Node):
 
         self.declare_parameter(
             'map_yaml',
-            '../amr-team-adu/maps/lab_c-069.yaml'
+            '../amr-team-adu/maps/closed_walls_map.yaml'
             )
 
         self.declare_parameter('num_particles', 300)
