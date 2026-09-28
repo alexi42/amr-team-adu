@@ -48,7 +48,7 @@ Make sure the robot is publishing the required ROS 2 topics:
 
 Start the path-planning node after starting the robot.
 
-The node uses A* to find a path to the goal. It uses a potential field controller to follow the path and avoid obstacles.
+The node uses A* to find a path to the goal. It uses a potential field path planner to follow the path and avoid obstacles.
 
 ```bash
 ros2 run amr_adu_robile pot_field_path_planning
@@ -100,11 +100,11 @@ ros2 run amr_adu_robile wall_follower
 
 ## 1. Path and Motion Planning
 
-We combined a global path planner with a local potential field controller.
+We combined a global path planner with a local potential field path planner.
 
-### Potential Field Controller
+### Potential Field Path Planner
 
-The potential field controller uses attractive and repulsive forces.
+The potential field path planner uses attractive and repulsive forces.
 
 The attractive force moves the robot towards its goal. The repulsive force pushes it away from nearby obstacles.
 
@@ -136,7 +136,7 @@ The robot uses A* to find a path to the goal. This state is used at the beginnin
 
 **FOLLOW WAYPOINTS**
 
-The potential field controller moves the robot towards the next waypoint.
+The potential field path planner moves the robot towards the next waypoint.
 
 A waypoint is removed from the list when the robot is within 0.05 m of it.
 
@@ -232,7 +232,7 @@ This allows the robot and the map to be shown in the same coordinate frame in RV
 
 ## 3. Environment Exploration and Mapping
 
-For this task, we implemented wall following together with a potential field controller.
+For this task, we implemented wall following together with a potential field path planner.
 
 The robot explores the environment while creating an occupancy grid.
 
@@ -262,7 +262,7 @@ If the robot approaches a corner or an obstacle in front of it, it turns left.
 
 If the wall on its right side disappears, it turns right until it can follow the wall again.
 
-The next goal is usually placed in front of the robot. This goal is passed to the potential field controller.
+The next goal is usually placed in front of the robot. This goal is passed to the potential field path planner.
 
 The attractive force moves the robot towards the goal. The repulsive force helps it avoid nearby obstacles.
 
@@ -411,3 +411,4 @@ Additional filtering and localisation would be needed to improve the real-robot 
 
 - [A* Search Algorithm in Python – GeeksforGeeks](https://www.geeksforgeeks.org/python/a-search-algorithm-in-python/)
 - [Robile ROS Repository](https://github.com/HBRS-AMR/Robile)
+- [Wall Follower in Robile ROS Repository] https://github.com/HBRS-AMR/Robile/blob/main/robile_navigation/robile_navigation_demo/ros/scripts/wall_follower.py
