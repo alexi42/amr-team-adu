@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'pot_field_path_planning = amr_adu_robile.pot_field_path_planning:main',
+            'localisation = amr_adu_robile.localisation:main'
             'wall_follower = amr_adu_robile.wall_follower:main',
             'potential = amr_adu_robile.pot_field_path_planner:main'
         ],
