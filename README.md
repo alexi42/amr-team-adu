@@ -411,4 +411,4 @@ Additional filtering and localisation would be needed to improve the real-robot 
 
 - [A* Search Algorithm in Python – GeeksforGeeks](https://www.geeksforgeeks.org/python/a-search-algorithm-in-python/)
 - [Robile ROS Repository](https://github.com/HBRS-AMR/Robile)
-- [Wall Follower in Robile ROS Repository] https://github.com/HBRS-AMR/Robile/blob/main/robile_navigation/robile_navigation_demo/ros/scripts/wall_follower.py
+- [Wall Follower in Robile ROS Repository](https://github.com/HBRS-AMR/Robile/blob/main/robile_navigation/robile_navigation_demo/ros/scripts/wall_follower.py)
