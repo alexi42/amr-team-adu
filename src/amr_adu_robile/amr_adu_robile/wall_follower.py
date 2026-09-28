@@ -90,7 +90,7 @@ class WallFollowerExploration(Node):
         # Update occupancy grid timer
 
         self.timer_occupancy_grid = self.create_timer(
-            0.3,  # 1 Hz
+            0.3,  # 3.3 Hz
             self.update_occupancy_grid,
         )
 
@@ -404,7 +404,7 @@ class WallFollowerExploration(Node):
 
     def update_occupancy_grid(self):
         """Mark visible cells as free and detected endpoints as occupied."""
-        if (self.latest_scan or self.robot_position or self.robot_angle) is None:
+        if (self.latest_scan is None) or (self.robot_position is None) or (self.robot_angle is None):
             return
         if self.occupancy_grid_map is None:
             self.occupancy_grid_map = np.full((COL, ROW), -1, dtype=np.int8)
