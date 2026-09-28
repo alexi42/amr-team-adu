@@ -80,11 +80,18 @@ class WallFollowerExploration(Node):
             map_qos
         )
 
-        # Control loop timer
+        # Explore environment timer
 
         self.timer = self.create_timer(
             0.1,  # 10 Hz
             self.explore_environment,
+        )
+
+        # Update occupancy grid timer
+
+        self.timer_occupancy_grid = self.create_timer(
+            0.3,  # 1 Hz
+            self.update_occupancy_grid,
         )
 
     def odom_callback(self, msg):
@@ -110,7 +117,7 @@ class WallFollowerExploration(Node):
         self.latest_scan = msg
         self.latest_scan_cartesian = self.convert_scan_to_cartesian_coordinates(msg)
 
-        self.update_occupancy_grid(msg, self.robot_position, self.robot_angle)
+        # self.update_occupancy_grid(msg, self.robot_position, self.robot_angle)
 
     def convert_scan_to_cartesian_coordinates(self, scan):
         """Calculate latest scan measurements to cartesian coorinates."""
@@ -395,30 +402,32 @@ class WallFollowerExploration(Node):
         occupancy_grid_msg.data = grid_one_dim
         self.occupancy_grid_pub.publish(occupancy_grid_msg)
 
-    def update_occupancy_grid(self, scan, robot_position, robot_angle):
+    def update_occupancy_grid(self):
         """Mark visible cells as free and detected endpoints as occupied."""
+        if (self.latest_scan or self.robot_position or self.robot_angle) is None:
+            return
         if self.occupancy_grid_map is None:
             self.occupancy_grid_map = np.full((COL, ROW), -1, dtype=np.int8)
 
         robot_col, robot_row = convert_world_coordinates_to_grid(
-            robot_position, START, RESOLUTION,
+            self.robot_position, START, RESOLUTION,
         )
 
         if robot_row is None or robot_col is None:
             return
 
-        for index, range_value in enumerate(scan.ranges):
+        for index, range_value in enumerate(self.latest_scan.ranges):
             if np.isnan(range_value) or np.isinf(range_value):
                 continue
 
-            angle = scan.angle_min + index * scan.angle_increment
+            angle = self.latest_scan.angle_min + index * self.latest_scan.angle_increment
 
             # A max-range beam has no confirmed occupied endpoint.
             has_obstacle = (
-                scan.range_min <= range_value < scan.range_max
+                self.latest_scan.range_min <= range_value < self.latest_scan.range_max
             )
 
-            distance = min(float(range_value), float(scan.range_max))
+            distance = min(float(range_value), float(self.latest_scan.range_max))
 
             endpoint_base = np.array([
                 distance * np.cos(angle),
@@ -426,7 +435,7 @@ class WallFollowerExploration(Node):
             ])
 
             endpoint_world = transform_to_world(
-                robot_position, robot_angle, endpoint_base,
+                self.robot_position, self.robot_angle, endpoint_base,
             )
 
             end_col, end_row = (
