@@ -30,15 +30,15 @@ class ParticleFilter(Node):
         super().__init__('particle_filter')
 
         self.set_parameters([
-            Parameter('use_sim_time', value=True)
+            Parameter('use_sim_time', value=False)
         ])          
 
         self.declare_parameter(
             'map_yaml',
-            '../amr-team-adu/maps/closed_walls_map.yaml'
+            '/home/trgtulas/amr_ws/src/amr_adu_robile/amr_adu_robile/maps/closed_walls_map.yaml'
             )
 
-        self.declare_parameter('num_particles', 300)
+        self.declare_parameter('num_particles', 1500)
 
         map_path = self.get_parameter('map_yaml').value
 
@@ -116,16 +116,13 @@ class ParticleFilter(Node):
         self.load_map(map_path)
         self.initialise_particles()
 
-        self.publish_map()
-        # Publish both for RViz.
+        # Publissh both for RViz.
         self.timer = self.create_timer(
-            1.0,
-            self.publish_particles
+            0.5,
+            self.publish_visualisation
         )
 
         self.get_logger().info('Particle filter started.')
-
-
 
     def scan_callback(self, scan):
         if self.particles is None or self.base_frame is None:
@@ -227,7 +224,10 @@ class ParticleFilter(Node):
         sigma = 0.20
 
         probabilities = (
-            0.05 + 0.95 * np.exp(-0.5 * (errors / sigma) ** 2)
+            0.05
+            + 0.95 * np.exp(
+                -0.5 * (errors / sigma) ** 2
+            )
         )
 
         # Combine all selected beams to calculate particle weights.
@@ -255,9 +255,21 @@ class ParticleFilter(Node):
 
         self.scan_updates += 1
 
-        if self.scan_updates % 10 == 0:
+        if self.scan_updates % 5 == 0:
+            ess = 1.0 / np.sum(weights ** 2)
+
+            if estimate is not None:
+                x, y, theta = estimate
+                pose_status = (
+                    f"pose=({x:.2f}, {y:.2f}, "
+                    f"{np.degrees(theta):.1f} deg)"
+                )
+            else:
+                pose_status = "pose=unavailable"
+
             self.get_logger().info(
-                f'Completed {self.scan_updates} LiDAR updates.'
+                f"ESS={ess:.0f}/{self.num_particles} | "
+                f"{pose_status}"
             )
 
     def ray_cast(self, laser_x, laser_y, ray_angles, max_range):
